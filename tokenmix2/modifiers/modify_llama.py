@@ -65,6 +65,20 @@ def new_posid(num_token: int, device, dtype, bsz):
     return appendix
 
 
+def check_and_apply_qk_rope(query, key, cos, sin):
+    batch_size, num_heads, num_query, head_dim = query.shape
+    num_kv = key.shape[-2]
+
+    assert key.shape == (batch_size, num_heads, num_kv, head_dim)
+
+    new_posid_spec = partial(new_posid, device=query.device, dtype=query.dtype, bsz=batch_size)
+
+    Q = apply_rotary_pos_emb(query, cos, sin, new_posid_spec(num_kv)[:,-num_query:])
+    K = apply_rotary_pos_emb(key, cos, sin, new_posid_spec(num_kv))
+
+    return Q, K
+
+
 def check_and_apply_rope(query, key, value, cos, sin):
     batch_size, num_heads, num_query, head_dim = query.shape
     num_kv = key.shape[-2]
@@ -334,7 +348,7 @@ def do_beacon_attn(query, key, value, cos, sin, o_proj, num_ordinal, num_memory,
     return o_proj(output)
 
 
-def do_causal_attn(query, key, value, cos, sin, out_proj = None):
+def do_causal_attn(query, key, value, cos, sin, out_proj = None, return_attn_score: bool = False):
     batch_size, num_heads, num_query, head_dim = query.shape
     query, key, value = check_and_apply_rope(query, key, value, cos, sin)
 
@@ -348,7 +362,67 @@ def do_causal_attn(query, key, value, cos, sin, out_proj = None):
     if out_proj is not None:
         attn_output = out_proj(attn_output)
 
-    return attn_output
+    return attn_output, attn_score if return_attn_score else attn_output
+
+
+def do_draft_attn_via_down_proj(query, key, q_down, k_down, cos, sin, return_true_score=False, random_idx=None):
+    batch_size, num_heads, num_query, head_dim = query.shape
+    Q, K = check_and_apply_qk_rope(query, key, cos, sin)
+
+    if random_idx is not None:
+        Q = Q[..., random_idx, :]
+
+    true_attn = Q @ K.transpose(-1, -2) if return_true_score else None
+    
+    Q = Q.transpose(1,2).flatten(2) @ q_down
+    Q = Q.unflatten(-1, (num_heads, -1)).transpose(1,2)
+
+    K = K.transpose(1,2).flatten(2) @ k_down
+    K = K.unflatten(-1, (num_heads, -1)).transpose(1,2)
+
+    draft_attn = Q @ K.transpose(-1,-2)
+
+    return draft_attn, true_attn
+
+
+def do_draft_attn_via_down_proj(query, key, q_down, k_down, cos, sin, return_true_score=False, random_idx=None):
+    batch_size, num_heads, num_query, head_dim = query.shape
+    Q, K = check_and_apply_qk_rope(query, key, cos, sin)
+
+    if random_idx is not None:
+        Q = Q[..., random_idx, :]
+
+    true_attn = Q @ K.transpose(-1, -2) if return_true_score else None
+    
+    Q = Q.transpose(1,2).flatten(2) @ q_down
+    Q = Q.unflatten(-1, (num_heads, -1)).transpose(1,2)
+
+    K = K.transpose(1,2).flatten(2) @ k_down
+    K = K.unflatten(-1, (num_heads, -1)).transpose(1,2)
+
+    draft_attn = Q @ K.transpose(-1,-2)
+
+    return draft_attn, true_attn
+
+
+def do_draft_attn_via_down_proj_sigmoid(query, key, q_down, k_down, cos, sin, return_true_score=False, random_idx=None):
+    batch_size, num_heads, num_query, head_dim = query.shape
+    Q, K = check_and_apply_qk_rope(query, key, cos, sin)
+
+    if random_idx is not None:
+        Q = Q[..., random_idx, :]
+
+    true_attn = Q @ K.transpose(-1, -2) if return_true_score else None
+    
+    Q = Q.transpose(1,2).flatten(2) @ q_down
+    Q = Q.unflatten(-1, (num_heads, -1)).transpose(1,2)
+
+    K = K.transpose(1,2).flatten(2) @ k_down
+    K = K.unflatten(-1, (num_heads, -1)).transpose(1,2)
+
+    draft_attn = Q @ K.transpose(-1,-2)
+
+    return draft_attn, true_attn
 
 
 def do_sdpa_attn(
@@ -359,7 +433,8 @@ def do_sdpa_attn(
         sin, 
         out_proj: torch.nn.Linear = None,
         query_down_proj: torch.nn.Parameter = None,
-        key_down_proj: torch.nn.Parameter = None):
+        key_down_proj: torch.nn.Parameter = None,
+        mask: torch.Tensor = None):
     batch_size, num_heads, num_query, head_dim = query.shape
     Q, K, V = check_and_apply_rope(query, key, value, cos, sin)
 
@@ -370,12 +445,16 @@ def do_sdpa_attn(
     if key_down_proj is not None:
         K = K.transpose(1,2).flatten(2) @ key_down_proj
         K = K.unflatten(-1, (num_heads, -1)).transpose(1,2)
-    
+
+    basic_mask = generate_mask(num_query, key.shape[-2], dtype=Q.dtype, device=Q.device)
+    mask = torch.minimum(mask, basic_mask) if mask is not None else basic_mask
+
     attn_output = torch.nn.functional.scaled_dot_product_attention(
         query=Q,
         key=K,
         value=V,
-        is_causal=True)
+        is_causal=False,
+        attn_mask=mask)
     
     attn_output = attn_output.transpose(1,2).flatten(2)
     if out_proj is not None:

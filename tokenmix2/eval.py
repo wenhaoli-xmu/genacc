@@ -114,7 +114,7 @@ def test_on_task_for_rmt(model, tokenizer, task_type, task_name, num_instance, t
 
 
 @torch.no_grad()
-def test_on_task(model, tokenizer, task_type, task_name, num_instance, truncation):
+def test_on_task(model, tokenizer, task_type, task_name, num_instance, truncation, callback=None):
 
     io_wrapper = TestIOWrapper(tokenizer, truncation)
     task = get_corpus(task_name)
@@ -138,6 +138,10 @@ def test_on_task(model, tokenizer, task_type, task_name, num_instance, truncatio
 
         if hasattr(model, 'reset'):
             model.reset()
+        
+        if callback is not None:
+            assert callable(callback)
+            callback(outputs)
 
     accum_total_output = post_process(accum_total_output, task_type)
 

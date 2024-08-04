@@ -37,10 +37,15 @@ class Evaluator:
         self.tasks = tasks
         self.iter = 0
 
+        if "callback" in kwargs:
+            self.callback = kwargs['callback']
+        else:
+            self.callback = None
+
 
     def evaluate(self):
         for task in self.tasks:
-            result = test_on_task(self.model, self.tokenizer, **task)
+            result = test_on_task(self.model, self.tokenizer, **task, callback=self.callback)
             print(json.dumps(result, indent=4))
 
 

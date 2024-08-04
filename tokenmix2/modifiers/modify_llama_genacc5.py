@@ -1,12 +1,14 @@
 import torch
 import types
-from .modify_llama import do_sdpa_attn
+from .modify_llama import do_sdpa_attn, do_causal_attn
 from transformers.models.llama.modeling_llama import CausalLMOutputWithPast, repeat_kv, CrossEntropyLoss
 from torch.utils.checkpoint import checkpoint
 from ..modifier import Modifier
 from peft import get_peft_model, LoraConfig, TaskType
 
-from typing import List, Tuple
+from typing import List, Tuple, Optional
+import numpy as np
+from multiprocessing import Pool
 
 
 def model_forward(
@@ -14,11 +16,15 @@ def model_forward(
     input_ids: torch.LongTensor,
     labels: torch.Tensor = None,
     kv_cache: List[Tuple[torch.Tensor, torch.Tensor]] = None,
+    return_attn_score: bool = False,
     **kwargs
 ):
-    hidden_states, kv_cache = self.model(
+    # model forward function
+    hidden_states, kv_cache, attn_scores = self.model(
         input_ids=input_ids,
-        kv_cache=kv_cache)
+        kv_cache=kv_cache,
+        return_attn_score=return_attn_score)
+
     logits = self.lm_head(hidden_states).float()
 
     loss = None
@@ -33,13 +39,18 @@ def model_forward(
         shift_labels = shift_labels.to(shift_logits.device)
         loss = loss_fct(shift_logits, shift_labels)
 
-    return CausalLMOutputWithPast(loss=loss, logits=logits, past_key_values=kv_cache)
+    return CausalLMOutputWithPast(
+        loss=loss, 
+        logits=logits, 
+        past_key_values=kv_cache,
+        attentions=attn_scores)
 
 
 def model_model_forward(
     self,
     input_ids: torch.LongTensor = None,
     kv_cache: List[Tuple[torch.Tensor, torch.Tensor]] = None,
+    return_attn_score: bool = False
 ):
     inputs_embeds = self.embed_tokens(input_ids)
     hidden_states = inputs_embeds
@@ -47,26 +58,34 @@ def model_model_forward(
     if kv_cache is None:
         kv_cache = [None] * len(self.layers)
 
+    attn_scores = []
+
     for layer_idx, (decoder_layer, kv_cache_layer) in enumerate(zip(self.layers, kv_cache)):
         if torch.is_grad_enabled():
-            hidden_states, kv_cache_layer = checkpoint(
+            hidden_states, kv_cache_layer, attn_score = checkpoint(
                 decoder_layer,
                 hidden_states,
                 kv_cache_layer,
+                return_attn_score,
                 use_reentrant=False)
         else:
-            hidden_states, kv_cache_layer = decoder_layer(hidden_states, kv_cache_layer)
-
+            hidden_states, kv_cache_layer, attn_score = decoder_layer(
+                hidden_states, 
+                kv_cache_layer,
+                return_attn_score)
+            
         kv_cache[layer_idx] = kv_cache_layer
+        attn_scores.append(attn_score)
 
     hidden_states = self.norm(hidden_states)
-    return hidden_states, kv_cache
 
+    return hidden_states, kv_cache, attn_scores
 
 def layer_forward(
     self,
     hidden_states: torch.Tensor,
     kv_cache: Tuple[torch.Tensor, torch.Tensor] = None,
+    return_attn_score: bool = False,
 ):
     device = self.self_attn.q_proj.weight.data.device
     if hidden_states.device != device:
@@ -75,7 +94,10 @@ def layer_forward(
     # do the self attention mechanism
     residual = hidden_states
     hidden_states = self.input_layernorm(hidden_states)
-    hidden_states, kv_cache = self.self_attn(hidden_states, kv_cache)
+    hidden_states, kv_cache, attn_score = self.self_attn(
+        hidden_states, 
+        kv_cache,
+        return_attn_score)
     hidden_states = residual + hidden_states
     
     # do the feed forward
@@ -84,13 +106,14 @@ def layer_forward(
     hidden_states = self.mlp(hidden_states)
     hidden_states = residual + hidden_states
 
-    return hidden_states, kv_cache
+    return hidden_states, kv_cache, attn_score
 
 
 def self_attn_forward(
     self,
     hidden_states: torch.Tensor,
     kv_cache: Tuple[torch.Tensor, torch.Tensor] = None,
+    return_attn_score: bool = False
 ):
 
     num_heads, embed_dim = self.config.num_attention_heads, self.config.hidden_size
@@ -111,20 +134,28 @@ def self_attn_forward(
         vals = torch.cat([val_cache, vals], dim=-2)
 
     kv_cache = (keys.data, vals.data)
+    cos, sin = self.rotary_emb(vals, seq_len=4096)
 
-    cos, sin = self.rotary_emb(vals, seq_len=128*1024)
+    if return_attn_score:
+        attn_output, attn_score = do_causal_attn(
+            query=ques,
+            key=keys,
+            value=vals,
+            cos=cos,
+            sin=sin,
+            out_proj=self.o_proj,
+            return_attn_score=return_attn_score)
+    else:
+        attn_output = do_sdpa_attn(
+            query=ques,
+            key=keys,
+            value=vals,
+            cos=cos,
+            sin=sin,
+            out_proj=self.o_proj)
+        attn_score = None
 
-    attn_output = do_sdpa_attn(
-        query=ques,
-        key=keys,
-        value=vals,
-        cos=cos,
-        sin=sin,
-        out_proj=self.o_proj,
-        query_down_proj=self.query_down_proj,
-        key_down_proj=self.key_down_proj)
-
-    return attn_output, kv_cache
+    return attn_output, kv_cache, attn_score.cpu()
 
 
 class Decoder(torch.nn.Module):
@@ -173,12 +204,14 @@ class Decoder(torch.nn.Module):
             enable_lora: bool = False,
             lora_kwargs: dict = None,
             rank: int = 512,
-            fix_layers: list = []):
+            fix_layers: list = [],
+            draft_kwargs: dict = {"use_draft": False}):
 
         super().__init__()
         self.decoder = decoder
         self.enable_lora = False
         self.fix_layers = fix_layers
+        self.draft_kwargs = draft_kwargs
 
         # 修改各种forward函数
         self.model.forward = types.MethodType(model_forward, self.model)
@@ -187,6 +220,7 @@ class Decoder(torch.nn.Module):
         for idx, layer in enumerate(self.layers):
 
             # modify the forward function
+            layer.self_attn.draft_kwargs = draft_kwargs
             layer.forward = types.MethodType(layer_forward, layer)
             layer.self_attn.forward = types.MethodType(self_attn_forward, layer.self_attn)
 
@@ -241,11 +275,14 @@ class Decoder(torch.nn.Module):
     def forward(
             self, 
             input_ids, 
-            labels=None):
+            labels=None,
+            return_attn_score=False):
 
+        # decoder forward
         outputs = self.decoder(
             input_ids=input_ids, 
-            labels=labels)
+            labels=labels,
+            return_attn_score=return_attn_score)
 
         return outputs
 
@@ -257,6 +294,7 @@ class Model(torch.nn.Module):
         ):
         super().__init__()
         self.decoder = decoder
+        self.return_attn_score = False
 
     def ft_params(self):
         params = self.decoder.ft_params()
@@ -266,12 +304,17 @@ class Model(torch.nn.Module):
     def reset(self):
         self.decoder.reset()
 
+    
+    def always_return_attn_score(self):
+        self.return_attn_score = True
+
 
     def forward(
             self,
             input_ids,
             labels=None,
             local_rank=None,
+            return_attn_score=False,
             **kwargs
         ):
 
@@ -293,17 +336,23 @@ class Model(torch.nn.Module):
             device = next(iter(self.decoder.parameters())).device
         input_ids = input_ids.to(device)
 
-        outputs = self.decoder(input_ids, labels=labels)
+        outputs = self.decoder(
+            input_ids, 
+            labels=labels,
+            return_attn_score=return_attn_score or self.return_attn_score)
+
         return outputs
 
 
-class LlamaGenAcc(Modifier):
+class LlamaGenAcc5(Modifier):
     def __init__(self, model, save_ckp, load_ckp, config):
         self.get_conf(config)
         assert isinstance(self.conf, dict)
         enable_lora = self.conf["enable_lora"]
         lora_kwargs = self.conf["lora_kwargs"]
         rank = self.conf["rank"]
+
+        draft_kwargs = self.conf['draft_kwargs']
         fix_layers = [] if "fix_layers" not in self.conf else self.conf["fix_layers"]
         
         decoder = Decoder(
@@ -311,7 +360,8 @@ class LlamaGenAcc(Modifier):
             enable_lora=enable_lora,
             lora_kwargs=lora_kwargs,
             rank=rank,
-            fix_layers=fix_layers)
+            fix_layers=fix_layers,
+            draft_kwargs=draft_kwargs)
 
         decoder = Model(decoder)
 
@@ -324,6 +374,18 @@ class LlamaGenAcc(Modifier):
 
     def reset(self):
         self.model.reset()
+
+
+    def is_benchmark_mode(self):
+        return self.model.decoder.is_benchmark_mode()
+
+    
+    def enable_benchmark_mode(self):
+        return self.model.decoder.enable_benchmark_mode()
+
+    
+    def disable_benchmark_mode(self):
+        return self.model.decoder.disable_benchmark_mode()
 
 
     @torch.no_grad()

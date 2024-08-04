@@ -1,12 +1,20 @@
 import torch
 import types
-from .modify_llama import do_sdpa_attn
+from .modify_llama import do_sdpa_attn, do_draft_attn_via_down_proj, generate_mask, check_and_apply_qk_rope
 from transformers.models.llama.modeling_llama import CausalLMOutputWithPast, repeat_kv, CrossEntropyLoss
 from torch.utils.checkpoint import checkpoint
 from ..modifier import Modifier
 from peft import get_peft_model, LoraConfig, TaskType
 
 from typing import List, Tuple
+import numpy as np
+from multiprocessing import Pool
+
+
+def do_draft_attn_via_down_proj(query, key, bench_mark=False):
+    batch_size, num_heads, num_query, head_dim = query.shape
+    true_attn = query @ key.transpose(-1, -2)
+    return true_attn, true_attn
 
 
 def model_forward(
@@ -98,6 +106,10 @@ def self_attn_forward(
     num_kv_group = num_heads // num_kv_heads
     head_dim = embed_dim // num_heads
 
+    prefill_cond1 = hidden_states.shape[-2] > 1
+    prefill_cond2 = kv_cache is None
+    is_prefill = prefill_cond1 and prefill_cond2
+
     ques = self.q_proj(hidden_states).unflatten(-1, (num_heads, head_dim)).transpose(1,2)
     keys = self.k_proj(hidden_states).unflatten(-1, (num_kv_heads, head_dim)).transpose(1,2)
     vals = self.v_proj(hidden_states).unflatten(-1, (num_kv_heads, head_dim)).transpose(1,2)
@@ -113,16 +125,81 @@ def self_attn_forward(
     kv_cache = (keys.data, vals.data)
 
     cos, sin = self.rotary_emb(vals, seq_len=128*1024)
+    cond1 = self.draft_kwargs['enable'] is True
+    cond2 = self.query_down_proj is not None and self.key_down_proj is not None
 
-    attn_output = do_sdpa_attn(
-        query=ques,
-        key=keys,
-        value=vals,
-        cos=cos,
-        sin=sin,
-        out_proj=self.o_proj,
-        query_down_proj=self.query_down_proj,
-        key_down_proj=self.key_down_proj)
+    if cond1 and cond2:
+
+        # 1. do the draft attention
+        draft_score, true_score = do_draft_attn_via_down_proj(
+            query=ques, key=keys,
+            bench_mark=self.draft_kwargs['bench_mark'])
+        
+        if is_prefill:
+            mask = generate_mask(*draft_score.shape[-2:], dtype=draft_score.dtype, device=draft_score.device)
+            draft_score += mask
+            if true_score is not None:
+                true_score += mask
+
+        # 2. compute the topk indices
+        def aggregate_topk(x, k):
+            assert isinstance(x, torch.Tensor) and x.ndim == 4
+            _, x_topk = x.topk(k=k, dim=-1)
+            return x_topk
+        
+        num_kv_pair = draft_score.shape[-1]
+        num_remain = num_kv_pair - int(num_kv_pair * self.draft_kwargs['mask_out'])
+        draft_indices = aggregate_topk(draft_score, num_remain)
+
+        if self.draft_kwargs['bench_mark']:
+
+            # 2.5 run benchmark to evaluate the performance of draft strategy
+            true_indices = aggregate_topk(true_score, num_remain)
+            self.ratios = []
+
+            for draft_head, true_head in zip(draft_indices[0], true_indices[0]):
+                ratios = []
+
+                for qid, (draft_query, true_query) in enumerate(zip(draft_head, true_head)):
+                    draft_set = set(draft_query[:qid + 1].tolist())
+                    true_set = set(true_query[:qid + 1].tolist())
+
+                    intersect = draft_set.intersection(true_set)
+                    union = draft_set.union(true_set)
+                    ratio = len(intersect) / len(union)
+                    ratios.append(ratio)
+                
+                self.ratios.append(sum(ratios) / len(ratios))
+
+
+        # 3. discard the unimportant token while keep the important ones
+        mask = torch.full(
+            (1, num_heads, ques.shape[-2], num_kv_pair), 
+            fill_value=torch.finfo(draft_score.dtype).min, 
+            dtype=draft_score.dtype, 
+            device=draft_score.device)
+        
+        mask = mask.scatter_(dim=-1, index=draft_indices, value=0)
+
+        attn_output = do_sdpa_attn(
+            query=ques,
+            key=keys,
+            value=vals,
+            cos=cos,
+            sin=sin,
+            mask=mask,
+            out_proj=self.o_proj)
+
+    else:
+        attn_output = do_sdpa_attn(
+            query=ques,
+            key=keys,
+            value=vals,
+            cos=cos,
+            sin=sin,
+            query_down_proj=self.query_down_proj,
+            key_down_proj=self.key_down_proj,
+            out_proj=self.o_proj)
 
     return attn_output, kv_cache
 
@@ -173,12 +250,14 @@ class Decoder(torch.nn.Module):
             enable_lora: bool = False,
             lora_kwargs: dict = None,
             rank: int = 512,
-            fix_layers: list = []):
+            fix_layers: list = [],
+            draft_kwargs: dict = {"use_draft": False}):
 
         super().__init__()
         self.decoder = decoder
         self.enable_lora = False
         self.fix_layers = fix_layers
+        self.draft_kwargs = draft_kwargs
 
         # 修改各种forward函数
         self.model.forward = types.MethodType(model_forward, self.model)
@@ -187,6 +266,7 @@ class Decoder(torch.nn.Module):
         for idx, layer in enumerate(self.layers):
 
             # modify the forward function
+            layer.self_attn.draft_kwargs = draft_kwargs
             layer.forward = types.MethodType(layer_forward, layer)
             layer.self_attn.forward = types.MethodType(self_attn_forward, layer.self_attn)
 
@@ -206,6 +286,21 @@ class Decoder(torch.nn.Module):
         self.enable_lora = enable_lora
         if self.enable_lora is True:
             self._init_lora(**lora_kwargs)
+
+
+    def is_benchmark_mode(self):
+        return self.draft_kwargs['bench_mark']
+
+
+    def get_ratios(self, reset=False):
+        ratios = []
+        for idx, layer in enumerate(self.layers):
+            if idx in self.fix_layers:
+                ratios.append(None)
+            else:
+                ratios.append(layer.self_attn.ratios)
+                del layer.self_attn.ratios
+        return ratios
 
 
     def ft_params(self):
@@ -297,13 +392,15 @@ class Model(torch.nn.Module):
         return outputs
 
 
-class LlamaGenAcc(Modifier):
+class LlamaGenAcc4(Modifier):
     def __init__(self, model, save_ckp, load_ckp, config):
         self.get_conf(config)
         assert isinstance(self.conf, dict)
         enable_lora = self.conf["enable_lora"]
         lora_kwargs = self.conf["lora_kwargs"]
         rank = self.conf["rank"]
+
+        draft_kwargs = self.conf['draft_kwargs']
         fix_layers = [] if "fix_layers" not in self.conf else self.conf["fix_layers"]
         
         decoder = Decoder(
@@ -311,7 +408,8 @@ class LlamaGenAcc(Modifier):
             enable_lora=enable_lora,
             lora_kwargs=lora_kwargs,
             rank=rank,
-            fix_layers=fix_layers)
+            fix_layers=fix_layers,
+            draft_kwargs=draft_kwargs)
 
         decoder = Model(decoder)
 

@@ -186,3 +186,18 @@ def get_modifier(method: str, model_type):
     elif method == 'genacc':
         from .modify_llama_genacc import LlamaGenAcc
         return None, LlamaGenAcc
+    elif method == 'genacc2':
+        from .modify_llama_genacc2 import LlamaGenAcc2
+        return None, LlamaGenAcc2
+    elif method == 'genacc3':
+        from .modify_llama_genacc3 import LlamaGenAcc3
+        return None, LlamaGenAcc3
+    elif method == 'genacc4':
+        from .modify_llama_genacc4 import LlamaGenAcc4
+        return None, LlamaGenAcc4
+    elif method == 'genacc5':
+        from .modify_llama_genacc5 import LlamaGenAcc5
+        return None, LlamaGenAcc5
+    elif method == 'genacc6':
+        from .modify_llama_genacc6 import LlamaGenAcc6
+        return None, LlamaGenAcc6
