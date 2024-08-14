@@ -1,12 +1,12 @@
 {
     "model": {
         "model_name": "meta-llama/Llama-2-7b-hf",
-        "model_dtype": "bf16",
-        "model_method": "genacc10",
+        "model_dtype": "fp16",
+        "model_method": "genacc8",
         "model_structure": null,
-        "save_ckp": "ckp/genacc-10.pth",
+        "save_ckp": "null",
         "load_ckp": null,
-        "config": "config/genacc-nolora-fix4.json",
+        "config": "config/genacc8.json",
         "device_map": null
     },
 

@@ -213,7 +213,6 @@ def self_attn_forward(
             true_score += attn_mask
             ret_attn = (draft_score, true_score)
 
-
         if self.draft_kwargs['bench_mark']:
 
             # 2.5 run benchmark to evaluate the performance of draft strategy
@@ -340,8 +339,8 @@ class Decoder(torch.nn.Module):
                 "device": layer.self_attn.q_proj.weight.device}
 
             if idx not in fix_layers:
-                layer.self_attn.query_down_proj = torch.nn.Parameter(torch.empty((4096, rank), **kwargs), requires_grad=True)
-                layer.self_attn.key_down_proj = torch.nn.Parameter(torch.empty((4096, rank), **kwargs), requires_grad=True)
+                layer.self_attn.query_down_proj = torch.nn.Parameter(torch.empty((1, 32, 128, rank), **kwargs), requires_grad=True)
+                layer.self_attn.key_down_proj = torch.nn.Parameter(torch.empty((1, 32, 128, rank), **kwargs), requires_grad=True)
                 torch.nn.init.xavier_uniform_(layer.self_attn.query_down_proj)
                 torch.nn.init.xavier_uniform_(layer.self_attn.key_down_proj)
             else:

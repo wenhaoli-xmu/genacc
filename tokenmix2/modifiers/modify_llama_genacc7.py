@@ -1,27 +1,31 @@
 import torch
 import types
-from .modify_llama import do_sdpa_attn, generate_mask, do_causal_attn
+from .modify_llama import do_sdpa_attn, do_draft_attn_via_down_proj, generate_mask, get_attn_score, check_and_apply_qk_rope
 from transformers.models.llama.modeling_llama import CausalLMOutputWithPast, repeat_kv, CrossEntropyLoss
 from torch.utils.checkpoint import checkpoint
 from ..modifier import Modifier
 from peft import get_peft_model, LoraConfig, TaskType
 
 from typing import List, Tuple, Optional
-import numpy as np
-from multiprocessing import Pool
-
+from profiler import WallTime
 
 def model_forward(
     self,
     input_ids: torch.LongTensor,
     labels: torch.Tensor = None,
     kv_cache: List[Tuple[torch.Tensor, torch.Tensor]] = None,
+    attn_supervise: bool = False,
+    attn_supervise_layers: Optional[list] = None,
+    attn_supervise_reduce: Optional[int] = None,
     **kwargs
 ):
     # model forward function
-    hidden_states, kv_cache = self.model(
+    hidden_states, kv_cache, draft_attn, true_attn = self.model(
         input_ids=input_ids,
-        kv_cache=kv_cache)
+        kv_cache=kv_cache,
+        attn_supervise=attn_supervise,
+        attn_supervise_layers=attn_supervise_layers,
+        attn_supervise_reduce=attn_supervise_reduce)
     
     logits = self.lm_head(hidden_states).float()
 
@@ -40,13 +44,17 @@ def model_forward(
     return CausalLMOutputWithPast(
         loss=loss, 
         logits=logits, 
-        past_key_values=kv_cache)
+        past_key_values=kv_cache,
+        attentions=(draft_attn, true_attn))
 
 
 def model_model_forward(
     self,
     input_ids: torch.LongTensor = None,
-    kv_cache: List[Tuple[torch.Tensor, torch.Tensor]] = None
+    kv_cache: List[Tuple[torch.Tensor, torch.Tensor]] = None,
+    attn_supervise: bool = False,
+    attn_supervise_layers: Optional[list] = None,
+    attn_supervise_reduce: Optional[list] = None,
 ):
     inputs_embeds = self.embed_tokens(input_ids)
     hidden_states = inputs_embeds
@@ -54,28 +62,44 @@ def model_model_forward(
     if kv_cache is None:
         kv_cache = [None] * len(self.layers)
 
+    draft_attns = []
+    true_attns = []
+
     for layer_idx, (decoder_layer, kv_cache_layer) in enumerate(zip(self.layers, kv_cache)):
         if torch.is_grad_enabled():
             layer_output = checkpoint(
                 decoder_layer,
                 hidden_states,
                 kv_cache_layer,
+                attn_supervise,
+                attn_supervise_layers,
+                attn_supervise_reduce,
                 use_reentrant=False)
         else:
             layer_output = decoder_layer(
                 hidden_states, 
-                kv_cache_layer)
+                kv_cache_layer,
+                attn_supervise,
+                attn_supervise_layers,
+                attn_supervise_reduce)
 
-        hidden_states, kv_cache_layer = layer_output
+        hidden_states, kv_cache_layer, draft_attn, true_attn = layer_output
+        draft_attns.append(draft_attn)
+        true_attns.append(true_attn)
+
         kv_cache[layer_idx] = kv_cache_layer
 
     hidden_states = self.norm(hidden_states)
 
-    return hidden_states, kv_cache
+    return hidden_states, kv_cache, draft_attns, true_attns
+
 def layer_forward(
     self,
     hidden_states: torch.Tensor,
     kv_cache: Tuple[torch.Tensor, torch.Tensor] = None,
+    attn_supervise: bool = False,
+    attn_supervise_layers: Optional[list] = None,
+    attn_supervise_reduce: Optional[int] = None,
 ):
     device = self.self_attn.q_proj.weight.data.device
     if hidden_states.device != device:
@@ -84,13 +108,12 @@ def layer_forward(
     # do the self attention mechanism
     residual = hidden_states
     hidden_states = self.input_layernorm(hidden_states)
-
-    attn_mat = None
-    hidden_states, kv_cache, attn_mat = self.self_attn(
+    hidden_states, kv_cache, draft_attn, true_attn = self.self_attn(
         hidden_states, 
-        kv_cache,
-        attn_mat)
-    
+        kv_cache, 
+        attn_supervise,
+        attn_supervise_layers,
+        attn_supervise_reduce)
     hidden_states = residual + hidden_states
     
     # do the feed forward
@@ -99,14 +122,16 @@ def layer_forward(
     hidden_states = self.mlp(hidden_states)
     hidden_states = residual + hidden_states
 
-    return hidden_states, kv_cache
+    return hidden_states, kv_cache, draft_attn, true_attn
 
 
 def self_attn_forward(
     self,
     hidden_states: torch.Tensor,
     kv_cache: Tuple[torch.Tensor, torch.Tensor] = None,
-    attn_mat: Optional[torch.Tensor] = None,
+    attn_supervise: bool = False,
+    attn_supervise_layers: Optional[list] = None,
+    attn_supervise_reduce: Optional[int] = None,
 ):
 
     num_heads, embed_dim = self.config.num_attention_heads, self.config.hidden_size
@@ -118,9 +143,23 @@ def self_attn_forward(
     prefill_cond2 = kv_cache is None
     is_prefill = prefill_cond1 and prefill_cond2
 
+    # ======================================
+    # NOTE: 注释掉
+    # is_fix_layer = self.q_proj2 is None
+    # ======================================
+
     ques = self.q_proj(hidden_states).unflatten(-1, (num_heads, head_dim)).transpose(1,2)
     keys = self.k_proj(hidden_states).unflatten(-1, (num_kv_heads, head_dim)).transpose(1,2)
     vals = self.v_proj(hidden_states).unflatten(-1, (num_kv_heads, head_dim)).transpose(1,2)
+
+
+    # ==============================================================================================
+    # NOTE: 注释掉
+    # if not is_fix_layer:
+    #     ques2 = self.q_proj2(hidden_states).unflatten(-1, (num_heads, head_dim)).transpose(1,2)
+    #     keys2 = self.k_proj2(hidden_states).unflatten(-1, (num_kv_heads, head_dim)).transpose(1,2)  
+    #     keys2 = repeat_kv(keys2, num_kv_group)
+    # ==============================================================================================
 
     keys = repeat_kv(keys, num_kv_group)
     vals = repeat_kv(vals, num_kv_group)
@@ -129,42 +168,75 @@ def self_attn_forward(
         key_cache, val_cache = kv_cache
         keys = torch.cat([key_cache, keys], dim=-2)
         vals = torch.cat([val_cache, vals], dim=-2)
+        
+        # =================================================
+        # NOTE: 注释掉
+        # if not is_fix_layer:
+        #     keys2 = torch.cat([key_cache, keys2], dim=-2)
+        # =================================================
 
     kv_cache = (keys.data, vals.data)
+    ret_attn = (None, None)
 
     cos, sin = self.rotary_emb(vals, seq_len=4096)
     cond1 = self.draft_kwargs['enable'] is True
-    cond2 = self.layer_idx in self.fix_layers
-    cond3 = self.layer_idx not in self.fix_layers
+
+    # ========================
+    # NOTE: 修改
+    # cond2 = not is_fix_layer
+    cond2 = cond1
+    # ========================
 
     if cond1 and cond2:
-        attn_output, _attn_mat = do_causal_attn(query=ques, key=keys, value=vals, cos=cos, sin=sin, out_proj=self.o_proj, return_attn_score=True)
-        attn_mat = attn_mat + [_attn_mat.cpu()] if isinstance(attn_mat, list) else [_attn_mat.cpu()]
-    
-    elif cond1 and cond3:
-        assert isinstance(attn_mat, list)
-        N = 64
 
-        # get reduced concat attention matrix
-        concat_attn_mat = torch.cat(attn_mat, dim=1).to(hidden_states.device)
-        reduced_concat_attn_mat = concat_attn_mat[..., :N, :N].squeeze(0).flatten(-2,-1)
+        # 0. apply randomly reduce
+        is_reduce = isinstance(attn_supervise_reduce, int)
+        random_idx = torch.randperm(ques.shape[-2])[:attn_supervise_reduce] if is_reduce is not None else None   
 
-        # get current attention matrix
-        _, true_score = do_causal_attn(query=ques, key=keys, value=vals, cos=cos, sin=sin, out_proj=self.o_proj, return_attn_score=True)
-        reduced_attn_mat = true_score[..., :N, :N].squeeze(0).flatten(-2,-1)
+        def get_attn_score_using_norm(query, key, cos, sin):
+            query = torch.ones_like(query)
+            key = torch.ones_like(key)
+            Q, K = check_and_apply_qk_rope(query, key, cos, sin)
+            return query @ key.transpose(-1,-2)
+            # Q, K = check_and_apply_qk_rope(query, key, cos, sin)
+            # query_norm = (query ** 2).sum(-1, keepdim=True).sqrt()
+            # key_norm = (key ** 2).sum(-1, keepdim=True).sqrt()
+            # return query_norm @ key_norm.transpose(-2,-1)
 
-        """
-        currently
-        ---------
-        reduced_concat_attn_mat is [len(fix_layers), N*N]
-        and reduced_attn_mat is [32, N*N]
+        def get_attn_score_using_xor(query, key, cos, sin):
+            Q, K = check_and_apply_qk_rope(query, key, cos, sin)
+            query_mean = query.mean(dim=-2, keepdim=True)
+            key_mean = key.mean(dim=-2, keepdim=True)
 
-        thus we can use inner product to evaluate the similarity between the vectors
-        """
-        sim = reduced_attn_mat @ reduced_concat_attn_mat.T
-        idx = sim.argmax(dim=-1, keepdim=False).type(torch.int64)
+            Q = Q > query_mean
+            K = K > key_mean
+            accum = torch.zeros((1, 32, Q.shape[-2], K.shape[-2]), dtype=query.dtype, device=query.device)
 
-        draft_score = concat_attn_mat[:, idx, ...]
+            for dim in range(128):
+                q_dim = Q[..., dim]
+                k_dim = K[..., dim]
+                accum += ~torch.logical_xor(q_dim[..., :, None], k_dim[..., None, :])
+
+            return accum
+        
+        def get_attn_score_using_qjl(query, key, cos, sin):
+            query, key = check_and_apply_qk_rope(query, key, cos, sin)
+            
+            key_norm = (key ** 2).sum(-1).sqrt()
+            key = (key > 0).type(key.dtype)
+
+            return query @ key.transpose(-2,-1) * key_norm[..., None, :]
+
+
+        true_score = get_attn_score(query=ques, key=keys, cos=cos, sin=sin)
+        draft_score = get_attn_score_using_qjl(query=ques, key=keys, cos=cos, sin=sin)
+
+        # pre-filling stage should do causal attention
+        if is_prefill:
+            mask = generate_mask(*draft_score.shape[-2:], dtype=draft_score.dtype, device=draft_score.device)
+            draft_score += mask
+            if true_score is not None:
+                true_score += mask
 
         # 2. compute the topk indices
         def aggregate_topk(x, k):
@@ -175,6 +247,23 @@ def self_attn_forward(
         num_kv_pair = draft_score.shape[-1]
         num_remain = num_kv_pair - int(num_kv_pair * self.draft_kwargs['mask_out'])
         draft_indices = aggregate_topk(draft_score, num_remain)
+
+        cond_a = attn_supervise_layers is None 
+        cond_b = not cond_a and self.layer_idx in attn_supervise_layers
+
+        if attn_supervise and (cond_a or cond_b):
+            assert self.draft_kwargs['bench_mark'] is False
+
+            # construct the train mask
+            true_indices = aggregate_topk(true_score, num_remain)
+            attn_mask = generate_mask(ques.shape[-2], keys.shape[-2], dtype=draft_score.dtype, device=draft_score.device)
+            
+            if is_reduce:
+                attn_mask = attn_mask[..., random_idx, :]
+
+            draft_score += attn_mask
+            true_score += attn_mask
+            ret_attn = (draft_score, true_score)
 
         if self.draft_kwargs['bench_mark']:
 
@@ -196,21 +285,27 @@ def self_attn_forward(
                 
                 self.ratios.append(sum(ratios) / len(ratios))
 
-        mask = torch.full(
-            (1, num_heads, ques.shape[-2], num_kv_pair), 
-            fill_value=torch.finfo(draft_score.dtype).min, 
-            dtype=draft_score.dtype, 
-            device=draft_score.device)
-        mask = mask.scatter_(dim=-1, index=draft_indices, value=0)
 
-        attn_output = do_sdpa_attn(
-            query=ques,
-            key=keys,
-            value=vals,
-            cos=cos,
-            sin=sin,
-            mask=mask,
-            out_proj=self.o_proj)
+        # 3. discard the unimportant token while keep the important 
+        if attn_supervise:
+            mask = None
+        else:
+            mask = torch.full(
+                (1, num_heads, ques.shape[-2], num_kv_pair), 
+                fill_value=torch.finfo(draft_score.dtype).min, 
+                dtype=draft_score.dtype, 
+                device=draft_score.device)
+            mask = mask.scatter_(dim=-1, index=draft_indices, value=0)
+
+        with WallTime.get("sdpa"):
+            attn_output = do_sdpa_attn(
+                query=ques,
+                key=keys,
+                value=vals,
+                cos=cos,
+                sin=sin,
+                mask=mask,
+                out_proj=self.o_proj)
 
     else:
         attn_output = do_sdpa_attn(
@@ -219,11 +314,9 @@ def self_attn_forward(
             value=vals,
             cos=cos,
             sin=sin,
-            query_down_proj=self.query_down_proj,
-            key_down_proj=self.key_down_proj,
             out_proj=self.o_proj)
 
-    return attn_output, kv_cache, attn_mat
+    return attn_output, kv_cache, *ret_attn
 
 
 class Decoder(torch.nn.Module):
@@ -285,26 +378,37 @@ class Decoder(torch.nn.Module):
         self.model.forward = types.MethodType(model_forward, self.model)
         self.model.model.forward = types.MethodType(model_model_forward, self.model.model)
 
+        def reconstruct(x):
+            from sklearn.decomposition import PCA
+            pca = PCA(n_components=rank)
+
+            x_np = x.cpu().float().numpy()
+            pca.fit(x_np)
+            y_np = pca.components_
+
+            z_np = x_np @ y_np.T @ y_np
+            z = torch.tensor(z_np, dtype=x.dtype, device=x.device)
+            return z
+
         for idx, layer in enumerate(self.layers):
 
             # modify the forward function
             layer.self_attn.draft_kwargs = draft_kwargs
             layer.forward = types.MethodType(layer_forward, layer)
             layer.self_attn.forward = types.MethodType(self_attn_forward, layer.self_attn)
-            layer.self_attn.fix_layers = fix_layers
 
-            kwargs = {
-                "dtype": layer.self_attn.q_proj.weight.dtype,
-                "device": layer.self_attn.q_proj.weight.device}
-
-            if idx not in fix_layers:
-                layer.self_attn.query_down_proj = torch.nn.Parameter(torch.empty((4096, rank), **kwargs), requires_grad=True)
-                layer.self_attn.key_down_proj = torch.nn.Parameter(torch.empty((4096, rank), **kwargs), requires_grad=True)
-                torch.nn.init.xavier_uniform_(layer.self_attn.query_down_proj)
-                torch.nn.init.xavier_uniform_(layer.self_attn.key_down_proj)
-            else:
-                layer.self_attn.query_down_proj = None
-                layer.self_attn.key_down_proj = None
+            # if idx not in fix_layers:
+            #     kwargs = {
+            #         "device": layer.self_attn.q_proj.weight.data.device,
+            #         "dtype": layer.self_attn.q_proj.weight.data.dtype}
+                
+                # layer.self_attn.q_proj2 = torch.nn.Linear(4096, 4096, bias=False, **kwargs)
+                # layer.self_attn.k_proj2 = torch.nn.Linear(4096, 4096, bias=False, **kwargs)
+                # layer.self_attn.q_proj2.weight.data = reconstruct(layer.self_attn.q_proj.weight.data.T).T
+                # layer.self_attn.k_proj2.weight.data = reconstruct(layer.self_attn.k_proj.weight.data.T).T
+            # else:
+            #     layer.self_attn.q_proj2 = None
+            #     layer.self_attn.k_proj2 = None
 
         self.enable_lora = enable_lora
         if self.enable_lora is True:
@@ -367,12 +471,23 @@ class Decoder(torch.nn.Module):
     def forward(
             self, 
             input_ids, 
-            labels=None):
+            labels=None,
+            attn_supervise=False,
+            attn_supervise_layers=None,
+            attn_supervise_reduce=None):
+
+        # assertions
+        if attn_supervise_layers is not None:
+            for layer_idx in attn_supervise_layers:
+                assert layer_idx not in self.fix_layers
 
         # decoder forward
         outputs = self.decoder(
             input_ids=input_ids, 
-            labels=labels)
+            labels=labels,
+            attn_supervise=attn_supervise,
+            attn_supervise_layers=attn_supervise_layers,
+            attn_supervise_reduce=attn_supervise_reduce)
 
         return outputs
 
@@ -399,6 +514,9 @@ class Model(torch.nn.Module):
             input_ids,
             labels=None,
             local_rank=None,
+            attn_supervise=False,
+            attn_supervise_layers=None,
+            attn_supervise_reduce=None,
             **kwargs
         ):
 
@@ -422,12 +540,15 @@ class Model(torch.nn.Module):
 
         outputs = self.decoder(
             input_ids, 
-            labels=labels)
+            labels=labels, 
+            attn_supervise=attn_supervise,
+            attn_supervise_layers=attn_supervise_layers,
+            attn_supervise_reduce=attn_supervise_reduce)
 
         return outputs
 
 
-class LlamaGenAcc6(Modifier):
+class LlamaGenAcc7(Modifier):
     def __init__(self, model, save_ckp, load_ckp, config):
         self.get_conf(config)
         assert isinstance(self.conf, dict)

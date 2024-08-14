@@ -374,35 +374,26 @@ def do_draft_attn_via_down_proj(query, key, q_down, k_down, cos, sin, return_tru
 
     true_attn = Q @ K.transpose(-1, -2) if return_true_score else None
     
-    Q = Q.transpose(1,2).flatten(2) @ q_down
-    Q = Q.unflatten(-1, (num_heads, -1)).transpose(1,2)
+    if q_down.ndim == 2:
+        Q = Q.transpose(1,2).flatten(2) @ q_down
+        Q = Q.unflatten(-1, (num_heads, -1)).transpose(1,2)
+    else:
+        Q = Q @ q_down
 
-    K = K.transpose(1,2).flatten(2) @ k_down
-    K = K.unflatten(-1, (num_heads, -1)).transpose(1,2)
+    if k_down.ndim == 2:
+        K = K.transpose(1,2).flatten(2) @ k_down
+        K = K.unflatten(-1, (num_heads, -1)).transpose(1,2)
+    else:
+        K = K @ k_down
 
     draft_attn = Q @ K.transpose(-1,-2)
 
     return draft_attn, true_attn
 
 
-def do_draft_attn_via_down_proj(query, key, q_down, k_down, cos, sin, return_true_score=False, random_idx=None):
-    batch_size, num_heads, num_query, head_dim = query.shape
+def get_attn_score(query, key, cos, sin):
     Q, K = check_and_apply_qk_rope(query, key, cos, sin)
-
-    if random_idx is not None:
-        Q = Q[..., random_idx, :]
-
-    true_attn = Q @ K.transpose(-1, -2) if return_true_score else None
-    
-    Q = Q.transpose(1,2).flatten(2) @ q_down
-    Q = Q.unflatten(-1, (num_heads, -1)).transpose(1,2)
-
-    K = K.transpose(1,2).flatten(2) @ k_down
-    K = K.unflatten(-1, (num_heads, -1)).transpose(1,2)
-
-    draft_attn = Q @ K.transpose(-1,-2)
-
-    return draft_attn, true_attn
+    return Q @ K.transpose(-1,-2)
 
 
 def do_draft_attn_via_down_proj_sigmoid(query, key, q_down, k_down, cos, sin, return_true_score=False, random_idx=None):

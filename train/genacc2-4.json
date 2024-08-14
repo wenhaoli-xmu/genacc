@@ -2,11 +2,11 @@
     "model": {
         "model_name": "meta-llama/Llama-2-7b-hf",
         "model_dtype": "bf16",
-        "model_method": "genacc10",
+        "model_method": "genacc2",
         "model_structure": null,
-        "save_ckp": "ckp/genacc-10.pth",
+        "save_ckp": "ckp/genacc2-4.pth",
         "load_ckp": null,
-        "config": "config/genacc-nolora-fix4.json",
+        "config": "config/genacc2-4.json",
         "device_map": null
     },
 
@@ -47,8 +47,8 @@
         "accum_grad": 1,
         "clip_grad": 1.0,
 
-        "save": 1000,
-        "eval": 1000,
+        "save": 10000,
+        "eval": 10000,
         "tasks": []
     }
 }

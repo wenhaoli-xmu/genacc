@@ -201,3 +201,32 @@ def get_modifier(method: str, model_type):
     elif method == 'genacc6':
         from .modify_llama_genacc6 import LlamaGenAcc6
         return None, LlamaGenAcc6
+    elif method == 'genacc7':
+        from .modify_llama_genacc7 import LlamaGenAcc7
+        return None, LlamaGenAcc7
+    elif method == 'genacc8':
+        from .modify_llama_genacc8 import LlamaGenAcc8
+        return None, LlamaGenAcc8
+    elif method == 'genacc9':
+        from .modify_llama_genacc9 import LlamaGenAcc9
+        return None, LlamaGenAcc9
+    elif method == 'genacc10':
+        from .modify_llama_genacc10 import LlamaGenAcc10
+        return None, LlamaGenAcc10
+    elif method == 'genacc11':
+        """
+        genacc11 是用来测试对 x 和 W 之间加入降维 & 升维矩阵之后的效果
+            * 添加了前两层fix
+            * 将降维模型用做draft model
+        """
+        from .modify_llama_genacc11 import LlamaGenAcc11
+        return None, LlamaGenAcc11
+    elif method == 'genacc12':
+        """
+        genacc12 在genacc11的基础上真正降维了, 并且使用了isolated rope
+        """
+        from .modify_llama_genacc12 import LlamaGenAcc12
+        return None, LlamaGenAcc12
+    elif method == 'isorope':
+        from .modify_llama_isorope import LlamaIsoRoPE
+        return None, LlamaIsoRoPE

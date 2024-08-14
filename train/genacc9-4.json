@@ -2,11 +2,11 @@
     "model": {
         "model_name": "meta-llama/Llama-2-7b-hf",
         "model_dtype": "bf16",
-        "model_method": "genacc10",
+        "model_method": "genacc9",
         "model_structure": null,
-        "save_ckp": "ckp/genacc-10.pth",
+        "save_ckp": "ckp/genacc9-4.pth",
         "load_ckp": null,
-        "config": "config/genacc-nolora-fix4.json",
+        "config": "config/genacc9_m98_warmup.json",
         "device_map": null
     },
 
@@ -21,34 +21,34 @@
             {
                 "data": "data/slimpajama/arxiv.json",
                 "conf": "config/slimpajama-trunc4k.json",
-                "partition": 0.1
+                "partition": 0.2
             },
             {
                 "data": "data/slimpajama/book.json",
                 "conf": "config/slimpajama-trunc4k.json",
-                "partition": 0.1
+                "partition": 0.2
             },
             {
                 "data": "data/slimpajama/github.json",
                 "conf": "config/slimpajama-trunc4k.json",
-                "partition": 0.6
+                "partition": 0.2
             },
             {
                 "data": "data/slimpajama/stackexchange.json",
                 "conf": "config/slimpajama-trunc4k.json",
-                "partition": 0.1
+                "partition": 0.2
             },
             {
                 "data": "data/slimpajama/wiki.json",
                 "conf": "config/slimpajama-trunc4k.json",
-                "partition": 0.1
+                "partition": 0.2
             }
         ],
         "accum_grad": 1,
         "clip_grad": 1.0,
 
-        "save": 1000,
-        "eval": 1000,
+        "save": 5000,
+        "eval": 5000,
         "tasks": []
     }
 }

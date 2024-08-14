@@ -3,12 +3,17 @@ from tokenmix2.misc import get_env_conf
 from tokenmix2.misc import Evaluator
 import argparse, os
 
+from profiler import WallTime
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--env_conf", type=str, default=None)
     parser.add_argument("--use_env_conf_tasks", action="store_true", default=False)
     args = parser.parse_args()
+
+    # WallTime("sdpa", cuda=[0,1,2,3])
+    # WallTime("draft_score", cuda=[0,1,2,3])
 
     env_conf = get_env_conf(args.env_conf)
     test_conf = get_env_conf("test_draft/eval.json")
@@ -71,3 +76,6 @@ if __name__ == '__main__':
         evaluator = evaluator_class(model, tokenizer, eval=None, tasks=test_conf, callback=callback)
     
     evaluator.evaluate()
+
+    # for value in WallTime.regist.values():
+    #     value.result(detail=True)
