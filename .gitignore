@@ -5,6 +5,8 @@ wandb/
 # checkpoints
 ckp/
 *.pth
+train_cache/
+train_results/
 
 # datasets
 mmlu/

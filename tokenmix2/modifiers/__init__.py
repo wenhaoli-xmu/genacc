@@ -227,6 +227,84 @@ def get_modifier(method: str, model_type):
         """
         from .modify_llama_genacc12 import LlamaGenAcc12
         return None, LlamaGenAcc12
+    
+
+    elif method == 'genacc14':
+        """
+        * 1bit量化
+        * 设置了一个量化的zero point和一个量化的threshold，这两个都是作为可学习的参数
+        * 没有使用lora微调
+        """
+        from .modify_llama_genacc14 import LlamaGenAcc14
+        return None, LlamaGenAcc14
+    
+
+    elif method == 'genacc15':
+        """
+        * 使用angle LSH
+        * 即将random projection矩阵使用旋转矩阵（正交矩阵）
+        """
+        from .modify_llama_genacc15 import LlamaGenAcc15
+        return None, LlamaGenAcc15
+    
+    elif method == 'genacc16':
+        """
+        * 使用angle LSH
+        * random projection矩阵可以训练
+        * 使用类似ranknet的pairwise ranking loss
+        """
+        from .modify_llama_genacc16 import LlamaGenAcc16
+        return None, LlamaGenAcc16
+    
+
+    elif method == 'genacc17':
+        """
+        * 使用添加过rope之后的降维
+        * 降维矩阵可训练
+        * 为了测试pairwise ranking loss效果如何
+        """
+        from .modify_llama_genacc17 import LlamaGenAcc17
+        return None, LlamaGenAcc17
+
+
+    elif method == 'genacc18':
+        """
+        * 使用添加过rope之后的降维
+        * 降维矩阵可训练
+        * 这个是genacc17的测试版本
+        """
+        from .modify_llama_genacc18 import LlamaGenAcc18
+        return None, LlamaGenAcc18
+    
+
+    elif method == 'genacc19':
+        """
+        * 采用了MLP predictor + set prediction loss
+        """
+        from .modify_llama_genacc19 import LlamaGenAcc19
+        return None, LlamaGenAcc19
+    
+    elif method == 'genacc20':
+        """
+        * genacc19的evaluation版本
+        """
+        from .modify_llama_genacc20 import LlamaGenAcc20
+        return None, LlamaGenAcc20
+
+    elif method == 'genacc21':
+        """
+        * 使用了up proj & down proj的MLP predictor + set prediction loss
+        """
+        from .modify_llama_genacc21 import LlamaGenAcc21
+        return None, LlamaGenAcc21
+
+    elif method == 'genacc22':
+        """
+        * genacc21的evaluation版本
+        """
+        from .modify_llama_genacc22 import LlamaGenAcc22
+        return None, LlamaGenAcc22
+
     elif method == 'isorope':
         from .modify_llama_isorope import LlamaIsoRoPE
         return None, LlamaIsoRoPE

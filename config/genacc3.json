@@ -1,10 +1,10 @@
 {
     "rank": 512,
-    "fix_layers": [0,1,2],
+    "fix_layers": [0,1],
 
     "draft_kwargs": {
         "enable": true,
-        "mask_out": 0.99,
+        "mask_out": 0.98,
         "bench_mark": false
     },
 

@@ -171,7 +171,7 @@ def self_attn_forward(
 
         def get_attn_score_using_quant(query, key, cos, sin):
             query, key = check_and_apply_qk_rope(query, key, cos, sin)
-            key = (key > 0).type(query.dtype)
+            key = (key > self.channel_bias).type(query.dtype)
             return query @ key.transpose(-1,-2)
 
         true_score = get_attn_score(query=ques, key=keys, cos=cos, sin=sin)
@@ -351,7 +351,7 @@ class Decoder(torch.nn.Module):
             layer.self_attn.draft_kwargs = draft_kwargs
             layer.forward = types.MethodType(layer_forward, layer)
             layer.self_attn.forward = types.MethodType(self_attn_forward, layer.self_attn)
-            layer.self_attn.rand_mat = torch.randn((1, 32, 128, rank), **info)
+            layer.self_attn.channel_bias = torch.nn.Parameter(torch.zeros((1,32,1,128), **info), requires_grad=True)
             
 
         self.enable_lora = enable_lora
@@ -385,13 +385,17 @@ class Decoder(torch.nn.Module):
     def ft_params(self):
         params = []
 
-        for idx, layer in enumerate(self.layers):
-            if self.enable_lora and not layer.self_attn.is_fix_layer:
+        for layer in self.layers:
+            if not layer.self_attn.is_fix_layer:
                 params += [
-                    layer.self_attn.q_proj.lora_A.default.weight,
-                    layer.self_attn.q_proj.lora_B.default.weight,
-                    layer.self_attn.k_proj.lora_A.default.weight,
-                    layer.self_attn.k_proj.lora_B.default.weight]
+                    layer.self_attn.channel_bias]
+            
+                if self.enable_lora:
+                    params += [
+                        layer.self_attn.q_proj.lora_A.default.weight,
+                        layer.self_attn.q_proj.lora_B.default.weight,
+                        layer.self_attn.k_proj.lora_A.default.weight,
+                        layer.self_attn.k_proj.lora_B.default.weight]
 
         return params
 

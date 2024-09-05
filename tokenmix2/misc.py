@@ -135,7 +135,7 @@ def adjust_lr(optim, step, total, max_lr, min_lr, restart, warmup, plateau):
             max_lr=max_lr, 
             min_lr=min_lr, 
             restart=restart)
-        print(f"adjust lr: {param_group['lr']}")
+        # print(f"adjust lr: {param_group['lr']}")
 
 
 def lr_scheduler(epoch, total_epochs, warmup, plateau, max_lr, min_lr, restart=20):
@@ -225,7 +225,8 @@ def get_model_and_tokenizer(
 
 
 def get_optimizer_and_lr_adjuster(model, max_lr, train_iters, warmup, weight_decay, beta1, beta2, **kwargs):
-    optim = torch.optim.AdamW(model.ft_params(), lr=max_lr, betas=[beta1, beta2], weight_decay=weight_decay)
+    ft_params = model.ft_params() if 'extra_params' not in kwargs else model.ft_params() + kwargs['extra_params']
+    optim = torch.optim.AdamW(ft_params, lr=max_lr, betas=[beta1, beta2], weight_decay=weight_decay)
     lr_adjuster = partial(adjust_lr, optim=optim, total=train_iters, max_lr=max_lr, min_lr=0, restart=1, warmup=warmup, plateau=0)
     return optim, lr_adjuster
 
