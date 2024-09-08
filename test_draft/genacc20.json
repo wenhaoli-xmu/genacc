@@ -4,7 +4,7 @@
         "model_dtype": "fp16",
         "model_method": "genacc20",
         "model_structure": null,
-        "save_ckp": "null",
+        "save_ckp": "ckp/genacc19-6.pth",
         "load_ckp": null,
         "config": "config/genacc15.json",
         "device_map": null

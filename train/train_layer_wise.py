@@ -98,7 +98,6 @@ if __name__ == '__main__':
         print("model was deleted, waiting for GPU memory release")
 
     device = next(layer.parameters()).device
-
     files = sorted(os.listdir("train_cache"))
     accum_grad = env_conf["train"]["accum_grad"]
     clip_grad = env_conf["train"]["clip_grad"]
