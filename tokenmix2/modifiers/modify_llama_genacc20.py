@@ -1,6 +1,6 @@
 import torch
 import types
-from .modify_llama import do_sdpa_attn, do_draft_attn_via_down_proj, generate_mask, get_attn_score, check_and_apply_qk_rope
+from .modify_llama import do_sdpa_attn, do_draft_attn_via_down_proj, generate_mask, get_attn_score, check_and_apply_qk_rope, segment
 from transformers.models.llama.modeling_llama import CausalLMOutputWithPast, repeat_kv, CrossEntropyLoss
 from torch.utils.checkpoint import checkpoint
 from ..modifier import Modifier
@@ -8,6 +8,63 @@ from peft import get_peft_model, LoraConfig, TaskType
 
 from typing import List, Tuple, Optional
 from profiler import WallTime
+import tqdm
+
+
+@torch.no_grad()
+def log_diffs(true_attn, draft_attn, layer_idx):
+    mask = torch.triu(torch.ones(true_attn.shape[-2:], dtype=torch.bool, device=true_attn.device), diagonal=1)[None, None, :, :]
+    true_attn = torch.masked_fill(true_attn, mask, value=torch.finfo(true_attn.dtype).min)
+    indices = torch.argsort(true_attn, dim=-1, descending=True)
+
+    top_cnt = int(indices.shape[-1] * 0.02)
+    top_indices = indices[..., :top_cnt]
+    oth_indices = indices[..., top_cnt:]
+
+    top_mask = torch.gather(mask.expand_as(true_attn), dim=-1, index=top_indices)[..., :, None]
+    oth_mask = torch.gather(mask.expand_as(true_attn), dim=-1, index=oth_indices)[..., None, :]
+
+    top_draft_attn = torch.gather(draft_attn, dim=-1, index=top_indices)[..., :, None]
+    oth_draft_attn = torch.gather(draft_attn, dim=-1, index=oth_indices)[..., None, :]
+
+    total_diff = 0
+    total_compare = 0
+
+    for top_seg, oth_seg, top_mask_seg, oth_mask_seg in tqdm.tqdm(
+        zip(
+        segment(top_draft_attn, dim=1, n=1),
+        segment(oth_draft_attn, dim=1, n=1),
+        segment(top_mask, dim=1, n=1),
+        segment(oth_mask, dim=1, n=1)),
+        desc=f'layer-{layer_idx}'
+    ):
+
+        residual = (top_seg - oth_seg)
+        residual_mask = (top_mask_seg | oth_mask_seg).expand_as(residual).flatten(-3)
+        logits = residual.flatten(-3)[~residual_mask.bool()]
+
+        diff = torch.count_nonzero(logits < 0)
+        compare = logits.numel()
+
+        total_diff += diff
+        total_compare += compare
+
+    # 算一下排序误差
+    diff = total_diff / total_compare
+    print(f"diff: {diff.item():<.3f}")
+
+
+def get_attn_score_using_angle_lsh(query, key, rot_mat1, rot_mat2, relu, cos, sin):
+    query, key = check_and_apply_qk_rope(query, key, cos, sin)
+
+    q_inner = relu(query @ rot_mat1) @ rot_mat2
+    k_inner = relu(key @ rot_mat1) @ rot_mat2
+
+    q_hash = torch.sign(q_inner)
+    k_hash = torch.sign(k_inner)
+
+    sim = q_hash @ k_hash.transpose(-1,-2)
+    return sim
 
 
 def random_rotation_matrix(dim, dtype, device):
@@ -133,6 +190,60 @@ def layer_forward(
     return hidden_states, kv_cache, draft_attn, true_attn
 
 
+def compute_attn_supervise_loss(draft_attn, true_attn, max_top, max_oth, maskout):
+    loss = torch.tensor(0, dtype=torch.float32)
+    diff = 0
+    total = 0
+    criterion = torch.nn.BCEWithLogitsLoss()
+        
+    # 计算出true attn的sort index
+    mask = torch.triu(torch.ones(true_attn.shape[-2:], dtype=torch.bool, device=true_attn.device), diagonal=1)[None, None, :, :]
+    true_attn = torch.masked_fill(true_attn, mask, value=torch.finfo(true_attn.dtype).min)
+    indices = torch.argsort(true_attn, dim=-1, descending=True)
+
+    # 切分出来top 0.01 的indices，和other 0.98的indices
+    top_cnt = int(indices.shape[-1] * (1 - maskout))
+    top_indices = indices[..., :top_cnt]
+    oth_indices = indices[..., top_cnt:]
+
+    if max_top is not None:
+        top_rnd_indices = torch.randperm(top_cnt, dtype=torch.int64, device=indices.device)[:max_top]
+        top_indices = top_indices[..., top_rnd_indices]
+    if max_oth is not None:
+        oth_rnd_indices = torch.randperm(indices.shape[-1] - top_cnt, dtype=torch.int64, device=indices.device)[:max_oth]
+        oth_indices = oth_indices[..., oth_rnd_indices]
+
+    top_mask = torch.gather(mask.expand_as(true_attn), dim=-1, index=top_indices)[..., :, None]
+    oth_mask = torch.gather(mask.expand_as(true_attn), dim=-1, index=oth_indices)[..., None, :]
+
+    top_draft_attn = torch.gather(draft_attn, dim=-1, index=top_indices)[..., :, None]
+    oth_draft_attn = torch.gather(draft_attn, dim=-1, index=oth_indices)[..., None, :]
+
+    num_heads = top_draft_attn.shape[1]
+
+    for top_head, oth_head, top_mask_head, oth_mask_head in zip(
+        segment(top_draft_attn, dim=1, n=1),
+        segment(oth_draft_attn, dim=1, n=1),
+        segment(top_mask, dim=1, n=1),
+        segment(oth_mask, dim=1, n=1)
+    ):
+
+        residual = top_head - oth_head
+        residual_mask = (top_mask_head | oth_mask_head).expand_as(residual).flatten(-3)
+
+        logits = residual.flatten(-3)[~residual_mask.bool()]
+        labels = torch.ones_like(logits, dtype=torch.float32)
+        loss += criterion(logits, labels.type(torch.float32)).cpu()
+        
+        diff += torch.count_nonzero(logits < 0).item()
+        total += logits.numel()
+
+    diff /= total
+    loss /= num_heads
+
+    return diff, loss
+
+
 def self_attn_forward(
     self,
     hidden_states: torch.Tensor,
@@ -172,48 +283,6 @@ def self_attn_forward(
 
     if cond1 and cond2:
 
-        # 0. apply randomly reduce
-        is_reduce = isinstance(attn_supervise_reduce, int)
-        random_idx = torch.randperm(ques.shape[-2])[:attn_supervise_reduce] if is_reduce is not None else None
-
-
-        def log_diffs(true_attn, draft_attn):
-            mask = torch.triu(torch.ones(true_attn.shape[-2:], dtype=torch.bool, device=true_attn.device), diagonal=1)[None, None, :, :]
-            true_attn = torch.masked_fill(true_attn, mask, value=torch.finfo(true_attn.dtype).min)
-            indices = torch.argsort(true_attn, dim=-1, descending=True)
-
-            top_cnt = int(indices.shape[-1] * 0.02)
-            top_indices = indices[..., :top_cnt]
-            oth_indices = indices[..., top_cnt:]
-
-            top_mask = torch.gather(mask.expand_as(true_attn), dim=-1, index=top_indices)[..., :, None]
-            oth_mask = torch.gather(mask.expand_as(true_attn), dim=-1, index=oth_indices)[..., None, :]
-
-            top_draft_attn = torch.gather(draft_attn, dim=-1, index=top_indices)[..., :, None]
-            oth_draft_attn = torch.gather(draft_attn, dim=-1, index=oth_indices)[..., None, :]
-
-            residual = (top_draft_attn - oth_draft_attn)
-            residual_mask = (top_mask | oth_mask).expand_as(residual).flatten(-3)
-
-            logits = residual.flatten(-3)[~residual_mask.bool()]
-
-            # 算一下排序误差
-            diff = torch.count_nonzero(logits < 0) / logits.numel()
-            print(f"diff: {diff.item():<.3f}")
-
-
-        def get_attn_score_using_angle_lsh(query, key, rot_mat1, rot_mat2, relu, cos, sin):
-            query, key = check_and_apply_qk_rope(query, key, cos, sin)
-
-            q_inner = relu(query @ rot_mat1) @ rot_mat2
-            k_inner = relu(key @ rot_mat1) @ rot_mat2
-
-            q_hash = torch.sign(q_inner)
-            k_hash = torch.sign(k_inner)
-
-            sim = q_hash @ k_hash.transpose(-1,-2)
-            return sim
-
         draft_score = get_attn_score_using_angle_lsh(
             query=ques, 
             key=keys, 
@@ -224,7 +293,7 @@ def self_attn_forward(
             sin=sin)
 
         true_score = get_attn_score(query=ques, key=keys, cos=cos, sin=sin)
-        # log_diffs(true_score, draft_score)
+        log_diffs(true_score, draft_score, self.layer_idx)
 
         # pre-filling stage should do causal attention
         if is_prefill:
@@ -242,6 +311,12 @@ def self_attn_forward(
         num_kv_pair = draft_score.shape[-1]
         num_remain = num_kv_pair - int(num_kv_pair * self.draft_kwargs['mask_out'])
         draft_indices = aggregate_topk(draft_score, num_remain)
+
+        # =========================================================================================================
+        # NOTE: test
+        # diff, loss = compute_attn_supervise_loss(draft_score, true_score, max_top=None, max_oth=1024, maskout=0.98)
+        # print(f"layer-{self.layer_idx}: {diff}, {loss}")
+        # =========================================================================================================
 
         cond_a = attn_supervise_layers is None 
         cond_b = not cond_a and self.layer_idx in attn_supervise_layers

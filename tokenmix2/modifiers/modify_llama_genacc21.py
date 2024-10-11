@@ -311,6 +311,13 @@ class Decoder(torch.nn.Module):
 
         return params
 
+    
+    def layer_ft_params(self, layer):
+        layer = self.layers[layer]
+        if layer.self_attn.is_fix_layer:
+            return []
+        return [layer.self_attn.rot_mat1, layer.self_attn.rot_mat2]
+
 
     def forward(
             self, 
@@ -410,6 +417,10 @@ class LlamaGenAcc21(Modifier):
 
     def ft_params(self):
         return self.model.ft_params()
+
+
+    def layer_ft_params(self, layer):
+        return self.model.decoder.layer_ft_params(layer)
 
 
     def reset(self):

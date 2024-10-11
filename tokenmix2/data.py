@@ -11,6 +11,8 @@ from glob import glob
 
 import random
 import uuid, os
+from corpus import LazyRandomSampleCorpus, get_processor
+
 
 
 def pack_lm(text: str):
@@ -757,6 +759,7 @@ class LongDataCorpusCopy(Dataset):
     
     def __len__(self):
         return len(self.data)
+
 
 
 CORPUS_MAPPING = {

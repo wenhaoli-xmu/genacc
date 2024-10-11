@@ -1,12 +1,12 @@
 #!/bin/bash
 
 
-for i in range(0, 4):
+for i in range(0, 8):
 
     handles = []
 
-    for j in range(0, 8):
-        layer_idx = i * 8 + j
+    for j in range(0, 4):
+        layer_idx = i * 4 + j
 
         handle = execute(CUDA_VISIBLE_DEVICES=j python train/train_layer_wise.py \
             --env_conf train/genacc19-6.json \

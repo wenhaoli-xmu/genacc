@@ -1,0 +1,17 @@
+Traceback (most recent call last):
+  File "/home/lwh/token-mix-3/train/train_prepare.py", line 7, in <module>
+    from tokenmix2.misc import get_model_and_tokenizer, get_env_conf, Saver, Evaluator, get_optimizer_and_lr_adjuster
+  File "/home/lwh/token-mix-3/tokenmix2/misc.py", line 3, in <module>
+    import torch
+  File "/home/lwh/miniconda3/envs/omniquant/lib/python3.10/site-packages/torch/__init__.py", line 1265, in <module>
+    from ._tensor import Tensor
+  File "/home/lwh/miniconda3/envs/omniquant/lib/python3.10/site-packages/torch/_tensor.py", line 12, in <module>
+    import torch.utils.hooks as hooks
+  File "/home/lwh/miniconda3/envs/omniquant/lib/python3.10/site-packages/torch/utils/__init__.py", line 8, in <module>
+    from . import collect_env
+  File "/home/lwh/miniconda3/envs/omniquant/lib/python3.10/site-packages/torch/utils/collect_env.py", line 6, in <module>
+    import locale
+  File "<frozen importlib._bootstrap>", line 1027, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1006, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 688, in _load_unlocked
+KeyboardInterrupt

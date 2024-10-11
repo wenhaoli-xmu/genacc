@@ -1,10 +1,11 @@
 import subprocess
 import multiprocessing
 
-def execute_command(gpu_id, layer_idx):
+
+def execute_command(gpu_id, layer_idx, env_conf):
     # Define the command to execute
     command = f"CUDA_VISIBLE_DEVICES={gpu_id} python train/train_layer_wise.py " \
-              f"--env_conf train/genacc19-7.json " \
+              f"--env_conf {env_conf} " \
               f"--layer {layer_idx} " \
               f"--max_oth 1024"
     
@@ -12,11 +13,13 @@ def execute_command(gpu_id, layer_idx):
     process = subprocess.Popen(command, shell=True)
     process.wait()  # Wait for the process to complete
 
+
 def main():
 
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--num_layers", type=int, default=32)
+    parser.add_argument("--env_conf", type=str, default=None)
     parser.add_argument("--gpus", type=str, default="[0]")
     args = parser.parse_args()
 
@@ -34,7 +37,7 @@ def main():
                 continue
 
             # Start a new process for each GPU and layer index
-            process = multiprocessing.Process(target=execute_command, args=(args.gpus[j], layer_idx))
+            process = multiprocessing.Process(target=execute_command, args=(args.gpus[j], layer_idx, args.env_conf))
             process.start()
             processes.append(process)
 

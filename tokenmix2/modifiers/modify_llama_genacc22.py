@@ -1,14 +1,13 @@
 import torch
 import types
-from .modify_llama import do_sdpa_attn, do_draft_attn_via_down_proj, generate_mask, get_attn_score, check_and_apply_qk_rope
+from .modify_llama import do_sdpa_attn, segment, generate_mask, get_attn_score, check_and_apply_qk_rope
 from transformers.models.llama.modeling_llama import CausalLMOutputWithPast, repeat_kv, CrossEntropyLoss
 from torch.utils.checkpoint import checkpoint
 from ..modifier import Modifier
 from peft import get_peft_model, LoraConfig, TaskType
 
 from typing import List, Tuple, Optional
-from profiler import WallTime
-
+import tqdm
 
 def random_rotation_matrix(dim, dtype, device):
     """
@@ -184,9 +183,10 @@ def self_attn_forward(
 
         # 0. apply randomly reduce
         is_reduce = isinstance(attn_supervise_reduce, int)
-        random_idx = torch.randperm(ques.shape[-2])[:attn_supervise_reduce] if is_reduce is not None else None
+        random_idx = torch.randperm(ques.shape[-2])[:attn_supervise_reduce] if is_reduce is True else None
 
 
+        @torch.no_grad()
         def log_diffs(true_attn, draft_attn):
             mask = torch.triu(torch.ones(true_attn.shape[-2:], dtype=torch.bool, device=true_attn.device), diagonal=1)[None, None, :, :]
             true_attn = torch.masked_fill(true_attn, mask, value=torch.finfo(true_attn.dtype).min)
@@ -202,13 +202,30 @@ def self_attn_forward(
             top_draft_attn = torch.gather(draft_attn, dim=-1, index=top_indices)[..., :, None]
             oth_draft_attn = torch.gather(draft_attn, dim=-1, index=oth_indices)[..., None, :]
 
-            residual = (top_draft_attn - oth_draft_attn)
-            residual_mask = (top_mask | oth_mask).expand_as(residual).flatten(-3)
+            total_diff = 0
+            total_compare = 0
 
-            logits = residual.flatten(-3)[~residual_mask.bool()]
+            for top_seg, oth_seg, top_mask_seg, oth_mask_seg in tqdm.tqdm(
+                zip(
+                segment(top_draft_attn, dim=2, n=1),
+                segment(oth_draft_attn, dim=2, n=1),
+                segment(top_mask, dim=2, n=1),
+                segment(oth_mask, dim=2, n=1)),
+                desc=f'layer-{self.layer_idx}'
+            ):
+
+                residual = (top_seg - oth_seg)
+                residual_mask = (top_mask_seg | oth_mask_seg).expand_as(residual).flatten(-3)
+                logits = residual.flatten(-3)[~residual_mask.bool()]
+
+                diff = torch.count_nonzero(logits < 0)
+                compare = logits.numel()
+
+                total_diff += diff
+                total_compare += compare
 
             # 算一下排序误差
-            diff = torch.count_nonzero(logits < 0) / logits.numel()
+            diff = total_diff / total_compare
             print(f"diff: {diff.item():<.3f}")
 
 
@@ -224,6 +241,7 @@ def self_attn_forward(
             sim = q_hash @ k_hash.transpose(-1,-2)
             return sim
 
+
         draft_score = get_attn_score_using_angle_lsh(
             query=ques, 
             key=keys, 
@@ -234,7 +252,7 @@ def self_attn_forward(
             sin=sin)
 
         true_score = get_attn_score(query=ques, key=keys, cos=cos, sin=sin)
-        # log_diffs(true_score, draft_score)
+        log_diffs(true_score, draft_score)
 
         # pre-filling stage should do causal attention
         if is_prefill:
