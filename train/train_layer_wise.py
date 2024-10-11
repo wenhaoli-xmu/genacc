@@ -105,52 +105,55 @@ if __name__ == '__main__':
     
     history_loss = []
     history_diff = []
+    epochs = env_conf['train']['train_iters'] // 1000
 
-    for file in tqdm(files):
-        path = os.path.join("train_cache", file)
-        inputs = torch.load(path)
 
-        for hidden_states in inputs:
-            hidden_states = hidden_states[args.layer: args.layer + 1, ...]
+    for _ in range(epochs):
+        for file in tqdm(files):
+            path = os.path.join("train_cache", file)
+            inputs = torch.load(path)
 
-            lr_adjust(step=step)
+            for hidden_states in inputs:
+                hidden_states = hidden_states[args.layer: args.layer + 1, ...]
 
-            # forward & backward
-            _, _, draft_attn, true_attn = layer(hidden_states=hidden_states.to(device))
-            grad = torch.zeros_like(draft_attn)
+                lr_adjust(step=step)
 
-            for head_idx, (draft_attn_head, true_attn_head) in enumerate(zip(
-                torch.chunk(draft_attn, chunks=draft_attn.shape[1], dim=1),
-                torch.chunk(true_attn, chunks=draft_attn.shape[1], dim=1),
-            )):
-                draft_attn_head = draft_attn_head.detach()
-                true_attn_head = true_attn_head.detach()
-                draft_attn_head.requires_grad_(True)
+                # forward & backward
+                _, _, draft_attn, true_attn = layer(hidden_states=hidden_states.to(device))
+                grad = torch.zeros_like(draft_attn)
 
-                diff, loss = compute_attn_supervise_loss(draft_attn_head, true_attn_head, args.max_top, args.max_oth, args.maskout)
-                loss.backward()
+                for head_idx, (draft_attn_head, true_attn_head) in enumerate(zip(
+                    torch.chunk(draft_attn, chunks=draft_attn.shape[1], dim=1),
+                    torch.chunk(true_attn, chunks=draft_attn.shape[1], dim=1),
+                )):
+                    draft_attn_head = draft_attn_head.detach()
+                    true_attn_head = true_attn_head.detach()
+                    draft_attn_head.requires_grad_(True)
 
-                grad[:, head_idx, ...] = draft_attn_head.grad.data[:]
+                    diff, loss = compute_attn_supervise_loss(draft_attn_head, true_attn_head, args.max_top, args.max_oth, args.maskout)
+                    loss.backward()
 
-                history_loss.append(loss.item())
-                history_diff.append(diff.item())
+                    grad[:, head_idx, ...] = draft_attn_head.grad.data[:]
 
-            grad /= accum_grad
-            draft_attn.backward(gradient=grad)
+                    history_loss.append(loss.item())
+                    history_diff.append(diff.item())
 
-            # update the parameters
-            if (step + 1) % accum_grad == 0:
-                if clip_grad is not None:
-                    torch.nn.utils.clip_grad_norm_(params, max_norm=clip_grad)
-                optim.step()
-                optim.zero_grad()
+                grad /= accum_grad
+                draft_attn.backward(gradient=grad)
 
-            torch.cuda.empty_cache()
-            step += 1
+                # update the parameters
+                if (step + 1) % accum_grad == 0:
+                    if clip_grad is not None:
+                        torch.nn.utils.clip_grad_norm_(params, max_norm=clip_grad)
+                    optim.step()
+                    optim.zero_grad()
 
-        print(f"layer: {args.layer}\tstep: {step}\tloss: {sum(history_loss) / len(history_loss):<.3f}\tdiff: {sum(history_diff) / len(history_diff):<.3f}", flush=True)
-        history_loss = []
-        history_diff = []
+                torch.cuda.empty_cache()
+                step += 1
+
+            print(f"layer: {args.layer}\tstep: {step}\tloss: {sum(history_loss) / len(history_loss):<.3f}\tdiff: {sum(history_diff) / len(history_diff):<.3f}", flush=True)
+            history_loss = []
+            history_diff = []
 
     # overall save
     save_path = args.env_conf.split('/')[-1]

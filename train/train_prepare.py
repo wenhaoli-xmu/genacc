@@ -39,6 +39,7 @@ if __name__ == '__main__':
     env_conf = get_env_conf(args.env_conf)
     tokenizer, model = get_model_and_tokenizer(**env_conf['model'])
     dataset = build_dataset(env_conf, tokenizer)
+
     loader = DataLoader(dataset, batch_size=1, shuffle=True)
     model.eval()
 
@@ -56,6 +57,6 @@ if __name__ == '__main__':
         inputs_record.append(inputs)
 
         if len(inputs_record) >= 10:
-            torch.save(inputs_record, f"train_cache/{counter}.pth")
+            torch.save(inputs_record, f"train_cache/{counter:0>3}.pth")
             inputs_record = []
             counter += 1
