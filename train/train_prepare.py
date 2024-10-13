@@ -60,3 +60,5 @@ if __name__ == '__main__':
             torch.save(inputs_record, f"train_cache/{counter:0>3}.pth")
             inputs_record = []
             counter += 1
+
+        torch.cuda.empty_cache()

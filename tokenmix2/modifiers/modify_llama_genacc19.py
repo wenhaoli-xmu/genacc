@@ -125,7 +125,8 @@ def layer_forward(
 
     hidden_states, kv_cache, draft_attn, true_attn = self.self_attn(
         hidden_states, 
-        kv_cache)
+        kv_cache,
+        return_inputs)
     hidden_states = residual + hidden_states
     
     # do the feed forward
@@ -157,6 +158,7 @@ def self_attn_forward(
     self,
     hidden_states: torch.Tensor,
     kv_cache: Tuple[torch.Tensor, torch.Tensor] = None,
+    return_inputs: bool = False
 ):
 
     num_heads, embed_dim = self.config.num_attention_heads, self.config.hidden_size
@@ -173,7 +175,10 @@ def self_attn_forward(
     
     cos, sin = self.rotary_emb(vals, seq_len=4096)
 
-    if not self.is_fix_layer:
+    cond1 = not self.is_fix_layer
+    cond2 = not return_inputs
+
+    if cond1 and cond2:
         draft_score = get_attn_score_using_angle_lsh(
             query=ques, 
             key=keys, 
