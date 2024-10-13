@@ -1,21 +1,4 @@
-"""
-intro
------
-* v4版本使用ranknet的pairwise ranking loss来学习排序
-"""
-
-from tokenmix2.misc import get_model_and_tokenizer, get_env_conf, adjust_lr
-
-import argparse
-from tqdm import tqdm
 import torch
-import os
-from functools import partial
-
-import deepspeed
-import time, gc
-from corpus import get_processor, RandomSampleCorpus
-from torch.utils.data import ConcatDataset
 
 
 def compute_attn_supervise_loss(draft_attn, true_attn, max_top, max_oth, maskout):
@@ -56,29 +39,3 @@ def compute_attn_supervise_loss(draft_attn, true_attn, max_top, max_oth, maskout
     diff = torch.count_nonzero(logits < 0) / logits.numel()
 
     return diff, loss
-
-
-def build_dataset(env_conf, tokenizer):
-    sum_partition = 0
-
-    num_iters = env_conf['train']['train_iters']
-    corpus = []
-    for info in env_conf['train']['corpus']:
-        sum_partition += info['partition']
-        num_instance = int(info['partition'] * num_iters)
-
-        proc = get_processor(info['conf'], tokenizer)
-        corp = RandomSampleCorpus(info['data'], proc, max_instance=num_instance, use_cache=False)
-        corpus.append(corp)
-
-    assert sum_partition == 1
-    return ConcatDataset(corpus)
-
-
-def get_optimizer_and_lr_adjuster(model, max_lr, train_iters, warmup, weight_decay, beta1, beta2, params, **kwargs):
-    optim = torch.optim.AdamW(params, lr=max_lr, betas=[beta1, beta2], weight_decay=weight_decay)
-    lr_adjuster = partial(adjust_lr, optim=optim, total=train_iters, max_lr=max_lr, min_lr=0, restart=1, warmup=warmup, plateau=0)
-    return optim, lr_adjuster
-
-
-

@@ -1,5 +1,5 @@
 {
-    "fix_layers": [0,1],
+    "fix_layers": [],
     "num_rnd_layers": 30,
     "gamma": 64,
 
