@@ -287,10 +287,9 @@ class Decoder(torch.nn.Module):
                 return torch.stack(rot_mats, dim=0).unsqueeze(0)
 
             if not layer.self_attn.is_fix_layer:
-                rot_mat = torch.randn((1, 32, 128, 128), **info) * 0.001
-                layer.self_attn.rot_mat1 = torch.nn.Parameter(rot_mat, requires_grad=True)
+                layer.self_attn.rot_mat1 = torch.nn.Parameter(get_rot_mat(), requires_grad=True)
                 layer.self_attn.relu1 = torch.nn.SiLU()
-                layer.self_attn.rot_mat2 = torch.nn.Parameter(rot_mat, requires_grad=True)
+                layer.self_attn.rot_mat2 = torch.nn.Parameter(get_rot_mat(), requires_grad=True)
 
 
     def is_benchmark_mode(self):

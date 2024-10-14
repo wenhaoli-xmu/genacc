@@ -130,6 +130,16 @@ if __name__ == '__main__':
 
     # 创建共享内存
     if args.local_rank == 0:
+        try:
+            shm = shared_memory.SharedMemory(name='inputs_record')
+            shm.unlink()
+        except: pass
+
+        try:
+            shm = shared_memory.SharedMemory(name='inputs_length')
+            shm.unlink()
+        except: pass
+
         shm = shared_memory.SharedMemory(
             name='inputs_record', 
             create=True, 
