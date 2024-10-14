@@ -3,11 +3,11 @@ log/
 wandb/
 
 # checkpoints
-ckp/
+ckp/*
 *.pth
-train_cache
-train_results
-data
+train_cache/*
+train_results/*
+!train_results/convert.py
 
 # datasets
 mmlu/
