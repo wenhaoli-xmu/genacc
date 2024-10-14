@@ -271,8 +271,13 @@ if __name__ == '__main__':
             clear_cache(args.local_rank)
 
         # overall save
-        save_path = env_conf.split('/')[-1]
+        save_path = args.env_conf.split('/')[-1]
         if not os.path.exists(f"train_results/{save_path}"):
             os.mkdir(f"train_results/{save_path}")
         torch.save(params, f"train_results/{save_path}/{layer_idx}.pth")
+        print(f"RANK{args.local_rank} training done !")
         torch.distributed.barrier()
+
+    if args.local_rank == 0:
+        shm.unlink()
+        shm2.unlink()
