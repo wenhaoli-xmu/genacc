@@ -11,12 +11,12 @@
     },
 
     "train": {
-        "train_iters": 10,
+        "train_iters": 4000,
         "max_lr": 0.001,
-        "warmup": 0.1,
+        "warmup": 0.01,
         "beta1": 0.9,
         "beta2": 0.98,
-        "weight_decay": 0.01,
+        "weight_decay": 0.1,
         "corpus": [
             {
                 "data": "data/slimpajama/arxiv.json",
