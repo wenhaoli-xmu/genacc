@@ -1,17 +1,12 @@
-# import subprocess
-import multiprocessing
 import torch
 from tokenmix2.misc import get_model_and_tokenizer, get_env_conf, adjust_lr, get_torch_dtype
 import gc, time
-import os, sys
-import math
+import os
 
 import deepspeed
 from corpus import LazyRandomSampleCorpus, get_processor
 from torch.utils.data import DataLoader, ConcatDataset
-import json
 from functools import partial
-from torch.utils.checkpoint import checkpoint
 from multiprocessing import shared_memory
 import numpy as np
 

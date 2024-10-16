@@ -158,6 +158,7 @@ def model_model_forward(
 
     return hidden_states, kv_cache, draft_attns, true_attns
 
+
 def layer_forward(
     self,
     hidden_states: torch.Tensor,
@@ -248,9 +249,6 @@ def self_attn_forward(
     self,
     hidden_states: torch.Tensor,
     kv_cache: Tuple[torch.Tensor, torch.Tensor] = None,
-    attn_supervise: bool = False,
-    attn_supervise_layers: Optional[list] = None,
-    attn_supervise_reduce: Optional[int] = None,
 ):
 
     num_heads, embed_dim = self.config.num_attention_heads, self.config.hidden_size
@@ -292,15 +290,10 @@ def self_attn_forward(
             cos=cos, 
             sin=sin)
 
-        true_score = get_attn_score(query=ques, key=keys, cos=cos, sin=sin)
-        log_diffs(true_score, draft_score, self.layer_idx)
-
         # pre-filling stage should do causal attention
         if is_prefill:
             mask = generate_mask(*draft_score.shape[-2:], dtype=draft_score.dtype, device=draft_score.device)
             draft_score += mask
-            if true_score is not None:
-                true_score += mask
 
         # 2. compute the topk indices
         def aggregate_topk(x, k):
@@ -318,26 +311,10 @@ def self_attn_forward(
         # print(f"layer-{self.layer_idx}: {diff}, {loss}")
         # =========================================================================================================
 
-        cond_a = attn_supervise_layers is None 
-        cond_b = not cond_a and self.layer_idx in attn_supervise_layers
-
-        if attn_supervise and (cond_a or cond_b):
-            assert self.draft_kwargs['bench_mark'] is False
-
-            # construct the train mask
-            true_indices = aggregate_topk(true_score, num_remain)
-            attn_mask = generate_mask(ques.shape[-2], keys.shape[-2], dtype=draft_score.dtype, device=draft_score.device)
-            
-            if is_reduce:
-                attn_mask = attn_mask[..., random_idx, :]
-
-            draft_score += attn_mask
-            true_score += attn_mask
-            ret_attn = (draft_score, true_score)
-
         if self.draft_kwargs['bench_mark']:
 
             # 2.5 run benchmark to evaluate the performance of draft strategy
+            true_score = get_attn_score(query=ques, key=keys, cos=cos, sin=sin)
             true_indices = aggregate_topk(true_score, num_remain)
             self.ratios = []
 
@@ -357,15 +334,13 @@ def self_attn_forward(
 
 
         # 3. discard the unimportant token while keep the important 
-        if attn_supervise:
-            mask = None
-        else:
-            mask = torch.full(
-                (1, num_heads, ques.shape[-2], num_kv_pair), 
-                fill_value=torch.finfo(draft_score.dtype).min, 
-                dtype=draft_score.dtype, 
-                device=draft_score.device)
-            mask = mask.scatter_(dim=-1, index=draft_indices, value=0)
+        mask = torch.full(
+            (1, num_heads, ques.shape[-2], num_kv_pair), 
+            fill_value=torch.finfo(draft_score.dtype).min, 
+            dtype=draft_score.dtype, 
+            device=draft_score.device)
+        mask = mask.scatter_(dim=-1, index=draft_indices, value=0)
+
 
         attn_output = do_sdpa_attn(
             query=ques,
