@@ -4,7 +4,6 @@ import argparse
 from tqdm import tqdm
 from torch.utils.data import DataLoader, ConcatDataset
 import torch
-import wandb
 from corpus import LazyRandomSampleCorpus, get_processor
 
 
@@ -35,8 +34,6 @@ if __name__ == '__main__':
     assert sum_partition == 1
     dataset = ConcatDataset(corpus)
 
-    wandb.init(project='hybird')
-
     accum_grad = env_conf["train"]["accum_grad"]
     clip_grad = env_conf["train"]["clip_grad"]
 
@@ -47,13 +44,7 @@ if __name__ == '__main__':
         loss = model(**batch).loss / accum_grad
         loss.backward()
 
-        wandb.log({
-            "Train": {
-                "Samples": {
-                    "train_loss": loss.item()
-                }
-            }
-        })
+        print(f"{step}: {loss.item()}")
 
         # update the parameters
         if (step + 1) % accum_grad == 0:
@@ -69,4 +60,3 @@ if __name__ == '__main__':
 
         torch.cuda.empty_cache()
 
-    wandb.finish()
