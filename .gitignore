@@ -19,3 +19,6 @@ data_cache/
 # misc
 *.egg-info/
 pred/
+lm-corpus
+lm-profiler
+*.pyc

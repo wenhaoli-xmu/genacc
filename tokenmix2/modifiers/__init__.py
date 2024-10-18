@@ -177,6 +177,9 @@ def get_modifier(method: str, model_type):
     elif method == "origin":
         from .modify_llama_origin import LlamaOrigin
         return None, LlamaOrigin
+    elif method == 'lora':
+        from .modify_llama_lora import LlamaLoRA
+        return None, LlamaLoRA
     elif method == 'flash':
         from .modify_llama_flash import LlamaFlash
         return None, LlamaFlash

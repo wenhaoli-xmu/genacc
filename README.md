@@ -25,6 +25,30 @@ P.S. 如果目录中不存在下面提到的文件夹，则需要自己使用 mk
 | train_results | 训练结果 |
 
 
+## 安装
+
+```
+conda create -n genacc -y python==3.10
+conda activate genacc
+
+git clone https://github.com/wenhaoli-xmu/genacc.git --branch dev_lwh
+git clone https://github.com/wenhaoli-xmu/lm-corpus.git
+git clone https://github.com/wenhaoli-xmu/lm-profiler.git
+
+cd lm-corpus
+pip install -e .
+cd ..
+
+cd lm-profiler
+pip install -e .
+cd ..
+
+cd genacc
+pip install -e .
+pip install -r requirements.txt
+```
+
+
 ## 大文件迁移
 
 **从MAC85迁移data文件夹**
