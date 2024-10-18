@@ -49,9 +49,25 @@ def post_process(response, model_name):
         response = response.split("<eoa>")[0]
     return response
 
+
+def load_tokenizer_and_model(env_conf):
+    tokenizer, model = get_model_and_tokenizer(**env_conf["model"])
+    ckp_file = env_conf['model']['save_ckp']
+    if os.path.exists(ckp_file):
+        print(f"load checkpoint {ckp_file}")
+        model.load_checkpoint(ckp_file)
+    else:
+        print(f"{ckp_file} dose not exists")
+    model.eval()
+
+    return tokenizer, model
+
+
 # modified: 将参数max_length去掉
 def get_pred(
         env_conf, 
+        tokenizer, 
+        model,
         data, 
         max_gen, 
         prompt_format, 
@@ -61,15 +77,7 @@ def get_pred(
         out_path, 
         model_max_length,
         chat_template):
-    tokenizer, model = get_model_and_tokenizer(**env_conf["model"])
-    ckp_file = env_conf['model']['save_ckp']
-    if os.path.exists(ckp_file):
-        print(f"load checkpoint {ckp_file}")
-        model.load_checkpoint(ckp_file)
-    else:
-        print(f"{ckp_file} dose not exists")
 
-    model.eval()
     
     for json_obj in tqdm(data):
 
@@ -195,6 +203,9 @@ if __name__ == '__main__':
         os.makedirs("pred")
     if not os.path.exists("pred_e"):
         os.makedirs("pred_e")
+
+    tokenizer, model = load_tokenizer_and_model(env_conf)
+
     for dataset in datasets:
         if args.e:
             data = load_dataset('LongBench/LongBench.py', f"{dataset}_e", split='test')
@@ -212,6 +223,8 @@ if __name__ == '__main__':
 
         get_pred(
             env_conf, 
+            tokenizer,
+            model,
             data_all, 
             max_gen if args.max_gen is None else args.max_gen, 
             prompt_format, 
