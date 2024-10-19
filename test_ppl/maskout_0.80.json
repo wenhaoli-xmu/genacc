@@ -1,12 +1,12 @@
 {
     "model": {
         "model_name": "meta-llama/Llama-2-7b-hf",
-        "model_dtype": "fp32",
-        "model_method": "isorope",
-        "model_structure": "llama",
-        "save_ckp": "null",
+        "model_dtype": "fp16",
+        "model_method": "genacc20",
+        "model_structure": null,
+        "save_ckp": "ckp/genacc19-10.pth",
         "load_ckp": null,
-        "config": null,
+        "config": "config/maskout80.json",
         "device_map": null
     },
 

@@ -89,18 +89,12 @@ def model_forward(
     input_ids: torch.LongTensor,
     labels: torch.Tensor = None,
     kv_cache: List[Tuple[torch.Tensor, torch.Tensor]] = None,
-    attn_supervise: bool = False,
-    attn_supervise_layers: Optional[list] = None,
-    attn_supervise_reduce: Optional[int] = None,
     **kwargs
 ):
     # model forward function
     hidden_states, kv_cache, draft_attn, true_attn = self.model(
         input_ids=input_ids,
-        kv_cache=kv_cache,
-        attn_supervise=attn_supervise,
-        attn_supervise_layers=attn_supervise_layers,
-        attn_supervise_reduce=attn_supervise_reduce)
+        kv_cache=kv_cache)
     
     logits = self.lm_head(hidden_states).float()
 
@@ -127,9 +121,6 @@ def model_model_forward(
     self,
     input_ids: torch.LongTensor = None,
     kv_cache: List[Tuple[torch.Tensor, torch.Tensor]] = None,
-    attn_supervise: bool = False,
-    attn_supervise_layers: Optional[list] = None,
-    attn_supervise_reduce: Optional[list] = None,
 ):
     inputs_embeds = self.embed_tokens(input_ids)
     hidden_states = inputs_embeds
@@ -143,10 +134,7 @@ def model_model_forward(
     for layer_idx, (decoder_layer, kv_cache_layer) in enumerate(zip(self.layers, kv_cache)):
         layer_output = decoder_layer(
             hidden_states, 
-            kv_cache_layer,
-            attn_supervise,
-            attn_supervise_layers,
-            attn_supervise_reduce)
+            kv_cache_layer)
 
         hidden_states, kv_cache_layer, draft_attn, true_attn = layer_output
         draft_attns.append(draft_attn)
@@ -163,9 +151,6 @@ def layer_forward(
     self,
     hidden_states: torch.Tensor,
     kv_cache: Tuple[torch.Tensor, torch.Tensor] = None,
-    attn_supervise: bool = False,
-    attn_supervise_layers: Optional[list] = None,
-    attn_supervise_reduce: Optional[int] = None,
 ):
     device = self.self_attn.q_proj.weight.data.device
     if hidden_states.device != device:
@@ -176,10 +161,7 @@ def layer_forward(
     hidden_states = self.input_layernorm(hidden_states)
     hidden_states, kv_cache, draft_attn, true_attn = self.self_attn(
         hidden_states, 
-        kv_cache, 
-        attn_supervise,
-        attn_supervise_layers,
-        attn_supervise_reduce)
+        kv_cache)
     hidden_states = residual + hidden_states
     
     # do the feed forward
@@ -311,26 +293,30 @@ def self_attn_forward(
         # print(f"layer-{self.layer_idx}: {diff}, {loss}")
         # =========================================================================================================
 
-        if self.draft_kwargs['bench_mark']:
 
-            # 2.5 run benchmark to evaluate the performance of draft strategy
-            true_score = get_attn_score(query=ques, key=keys, cos=cos, sin=sin)
-            true_indices = aggregate_topk(true_score, num_remain)
-            self.ratios = []
+        # =========================================================================================================
+        # NOTE: test
+        # if self.draft_kwargs['bench_mark']:
 
-            for draft_head, true_head in zip(draft_indices[0], true_indices[0]):
-                ratios = []
+        #     # 2.5 run benchmark to evaluate the performance of draft strategy
+        #     true_score = get_attn_score(query=ques, key=keys, cos=cos, sin=sin)
+        #     true_indices = aggregate_topk(true_score, num_remain)
+        #     self.ratios = []
 
-                for qid, (draft_query, true_query) in enumerate(zip(draft_head, true_head)):
-                    draft_set = set(draft_query[:qid + 1].tolist())
-                    true_set = set(true_query[:qid + 1].tolist())
+        #     for draft_head, true_head in zip(draft_indices[0], true_indices[0]):
+        #         ratios = []
 
-                    intersect = draft_set.intersection(true_set)
-                    union = draft_set.union(true_set)
-                    ratio = len(intersect) / len(union)
-                    ratios.append(ratio)
+        #         for qid, (draft_query, true_query) in enumerate(zip(draft_head, true_head)):
+        #             draft_set = set(draft_query[:qid + 1].tolist())
+        #             true_set = set(true_query[:qid + 1].tolist())
+
+        #             intersect = draft_set.intersection(true_set)
+        #             union = draft_set.union(true_set)
+        #             ratio = len(intersect) / len(union)
+        #             ratios.append(ratio)
                 
-                self.ratios.append(sum(ratios) / len(ratios))
+        #         self.ratios.append(sum(ratios) / len(ratios))
+        # =========================================================================================================
 
 
         # 3. discard the unimportant token while keep the important 
@@ -492,23 +478,12 @@ class Decoder(torch.nn.Module):
     def forward(
             self, 
             input_ids, 
-            labels=None,
-            attn_supervise=False,
-            attn_supervise_layers=None,
-            attn_supervise_reduce=None):
-
-        # assertions
-        if attn_supervise_layers is not None:
-            for layer_idx in attn_supervise_layers:
-                assert layer_idx not in self.fix_layers
+            labels=None):
 
         # decoder forward
         outputs = self.decoder(
             input_ids=input_ids, 
-            labels=labels,
-            attn_supervise=attn_supervise,
-            attn_supervise_layers=attn_supervise_layers,
-            attn_supervise_reduce=attn_supervise_reduce)
+            labels=labels)
 
         return outputs
 
@@ -535,9 +510,6 @@ class Model(torch.nn.Module):
             input_ids,
             labels=None,
             local_rank=None,
-            attn_supervise=False,
-            attn_supervise_layers=None,
-            attn_supervise_reduce=None,
             **kwargs
         ):
 
@@ -561,10 +533,7 @@ class Model(torch.nn.Module):
 
         outputs = self.decoder(
             input_ids, 
-            labels=labels, 
-            attn_supervise=attn_supervise,
-            attn_supervise_layers=attn_supervise_layers,
-            attn_supervise_reduce=attn_supervise_reduce)
+            labels=labels)
 
         return outputs
 
