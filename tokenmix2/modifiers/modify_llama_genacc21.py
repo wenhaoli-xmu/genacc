@@ -151,11 +151,7 @@ def layer_forward(
 
     # do the self attention mechanism
     residual = hidden_states
-    try:
-        hidden_states = self.input_layernorm(hidden_states)
-    except:
-        import IPython
-        IPython.embed(header='debug')
+    hidden_states = self.input_layernorm(hidden_states)
 
     hidden_states, kv_cache = self.self_attn(
         hidden_states, 
