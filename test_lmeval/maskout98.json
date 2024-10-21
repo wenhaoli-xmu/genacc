@@ -2,11 +2,11 @@
     "model": {
         "model_name": "meta-llama/Llama-2-7b-hf",
         "model_dtype": "fp16",
-        "model_method": "genacc21",
+        "model_method": "genacc20",
         "model_structure": null,
         "save_ckp": "ckp/genacc19-10.pth",
         "load_ckp": null,
-        "config": "config/genacc15.json",
+        "config": "config/maskout98.json",
         "device_map": null
     },
 
