@@ -220,6 +220,7 @@ def self_attn_forward(
 
         num_kv_pair = draft_score.shape[-1]
         num_remain = num_kv_pair - int(num_kv_pair * self.draft_kwargs['mask_out'])
+        num_remain = max(min(num_kv_pair, self.draft_kwargs['min_remain']), num_remain)
         draft_indices = aggregate_topk(draft_score, num_remain)
 
         # =========================================================================================================

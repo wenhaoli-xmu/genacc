@@ -5,6 +5,8 @@ wandb/
 # checkpoints
 ckp/*
 *.pth
+*.pyc
+__pycache__/
 train_cache/*
 train_results/*
 !train_results/convert.py
