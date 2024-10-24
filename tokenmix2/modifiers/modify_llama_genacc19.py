@@ -1,12 +1,13 @@
 import torch
 import types
-from .modify_llama import do_sdpa_attn, get_attn_score, check_and_apply_qk_rope
+from .modify_llama import do_sdpa_attn, check_and_apply_qk_rope, check_and_apply_qk_rope_random_query
 from transformers.models.llama.modeling_llama import CausalLMOutputWithPast, repeat_kv, CrossEntropyLoss
 from torch.utils.checkpoint import checkpoint
 from ..modifier import Modifier
 from peft import get_peft_model, LoraConfig, TaskType
+from functools import wraps
 
-from typing import List, Tuple
+from typing import List, Tuple, Union
 
 
 def random_rotation_matrix(dim, dtype, device):
@@ -39,27 +40,33 @@ def model_forward(
         input_ids=input_ids,
         kv_cache=kv_cache,
         return_inputs=return_inputs)
-    
-    logits = self.lm_head(hidden_states).float()
 
-    loss = None
-    if labels is not None:
-        shift_logits = logits[..., :-1, :].contiguous()
-        shift_labels = labels[..., 1:].contiguous()
 
-        loss_fct = CrossEntropyLoss()
-        shift_logits = shift_logits.view(-1, self.config.vocab_size)
-        shift_labels = shift_labels.view(-1)
+    if return_inputs:
+        return CausalLMOutputWithPast(
+            hidden_states=inputs_records
+        )
+    else:
+        logits = self.lm_head(hidden_states).float()
 
-        shift_labels = shift_labels.to(shift_logits.device)
-        loss = loss_fct(shift_logits, shift_labels)
+        loss = None
+        if labels is not None:
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
 
-    return CausalLMOutputWithPast(
-        loss=loss, 
-        logits=logits, 
-        past_key_values=kv_cache,
-        attentions=(draft_attn, true_attn),
-        hidden_states=inputs_records)
+            loss_fct = CrossEntropyLoss()
+            shift_logits = shift_logits.view(-1, self.config.vocab_size)
+            shift_labels = shift_labels.view(-1)
+
+            shift_labels = shift_labels.to(shift_logits.device)
+            loss = loss_fct(shift_logits, shift_labels)
+
+        return CausalLMOutputWithPast(
+            loss=loss, 
+            logits=logits, 
+            past_key_values=kv_cache,
+            attentions=(draft_attn, true_attn),
+            hidden_states=inputs_records)
 
 
 def model_model_forward(
@@ -138,8 +145,12 @@ def layer_forward(
     return hidden_states, kv_cache, draft_attn, true_attn, inputs_record
 
 
-def get_attn_score_using_angle_lsh(query, key, rot_mat1, rot_mat2, relu, cos, sin, gamma=64):
-    query, key = check_and_apply_qk_rope(query, key, cos, sin)
+def get_attn_score_using_angle_lsh(query, key, rot_mat1, rot_mat2, relu, cos, sin, gamma=64, query_index=None):
+    if query_index is None:
+        query, key = check_and_apply_qk_rope(query, key, cos, sin)
+    else:
+        assert query.shape[-2] == query_index.numel(), f"{query.shape}, {query_index.shape}"
+        query, key = check_and_apply_qk_rope_random_query(query, key, cos, sin, query_index)
 
     q_hash = relu(query @ rot_mat1) @ rot_mat2
     k_hash = relu(key @ rot_mat1) @ rot_mat2
@@ -154,11 +165,41 @@ def get_attn_score_using_angle_lsh(query, key, rot_mat1, rot_mat2, relu, cos, si
     return sim
 
 
+
+def get_attn_score(query, key, cos, sin, query_index):
+    if query_index is None:
+        Q, K = check_and_apply_qk_rope(query, key, cos, sin)
+        return Q @ K.transpose(-1,-2)
+    else:
+        assert query.shape[-2] == query_index.numel()
+        Q, K = check_and_apply_qk_rope_random_query(query, key, cos, sin, query_index)
+        return Q @ K.transpose(-1,-2)
+
+
+def maybe_checkpoint(function):
+    """
+    装饰器，用于对函数进行 gradient checkpointing
+    :param function: 被装饰的函数
+    """
+    @wraps(function)
+    def wrapper(*args):
+        if torch.is_grad_enabled():
+            # 如果梯度计算被启用，使用 checkpoint
+            return checkpoint(function, *args, use_reentrant=False)
+        else:
+            # 否则直接执行函数
+            return function(*args)
+
+    return wrapper
+
+
 def self_attn_forward(
     self,
     hidden_states: torch.Tensor,
     kv_cache: Tuple[torch.Tensor, torch.Tensor] = None,
-    return_inputs: bool = False
+    return_inputs: bool = False,
+    query_index: Union[list, torch.LongTensor] = None,
+    early_exit: bool = False,
 ):
 
     num_heads, embed_dim = self.config.num_attention_heads, self.config.hidden_size
@@ -166,35 +207,44 @@ def self_attn_forward(
     num_kv_group = num_heads // num_kv_heads
     head_dim = embed_dim // num_heads
 
-    ques = self.q_proj(hidden_states).unflatten(-1, (num_heads, head_dim)).transpose(1,2)
-    keys = self.k_proj(hidden_states).unflatten(-1, (num_kv_heads, head_dim)).transpose(1,2)
-    vals = self.v_proj(hidden_states).unflatten(-1, (num_kv_heads, head_dim)).transpose(1,2)
+    def do_projection(proj, states, num_heads, head_dim):
+        return proj(states).unflatten(-1, (num_heads, head_dim)).transpose(1,2)
+
+    # query projection
+    if query_index is not None:
+        if isinstance(query_index, list):
+            query_index = torch.tensor(query_index, dtype=torch.int64, device=hidden_states.device)
+        ques = do_projection(self.q_proj, hidden_states[..., query_index, :], num_heads, head_dim)
+    else:
+        ques = do_projection(self.q_proj, hidden_states, num_heads, head_dim)
+
+    # key & value projection
+    keys = do_projection(self.k_proj, hidden_states, num_kv_heads, head_dim)
+    vals = None if early_exit else do_projection(self.v_proj, hidden_states, num_kv_heads, head_dim)
 
     keys = repeat_kv(keys, num_kv_group)
-    vals = repeat_kv(vals, num_kv_group)
-    
-    cos, sin = self.rotary_emb(vals, seq_len=4096)
+    vals = None if early_exit else repeat_kv(vals, num_kv_group)
+
+    len1 = self.config.max_position_embeddings if hasattr(self.config, "max_position_embeddings") else 0
+    len2 = max(ques.shape[-2], keys.shape[-2])
+    cos, sin = self.rotary_emb(keys, seq_len=max(len1, len2))
 
     cond1 = not self.is_fix_layer
     cond2 = not return_inputs
 
     if cond1 and cond2:
         draft_score = get_attn_score_using_angle_lsh(
-            query=ques, 
-            key=keys, 
-            rot_mat1=self.rot_mat1,
-            rot_mat2=self.rot_mat2, 
-            relu=self.relu1, 
-            cos=cos, 
-            sin=sin, 
-            gamma=self.gamma)
+            ques, keys, self.rot_mat1, self.rot_mat2, self.relu1, cos, sin, self.gamma, query_index)
 
-        true_score = get_attn_score(query=ques, key=keys, cos=cos, sin=sin)
+        with torch.no_grad():
+            true_score = get_attn_score(query=ques, key=keys, cos=cos, sin=sin, query_index=query_index)
+        
         ret_attn = (draft_score, true_score)
+        
     else:
         ret_attn = (None, None)
 
-    attn_output = do_sdpa_attn(
+    attn_output = None if early_exit else do_sdpa_attn(
         query=ques,
         key=keys,
         value=vals,
@@ -251,15 +301,14 @@ class Decoder(torch.nn.Module):
             enable_lora: bool = False,
             lora_kwargs: dict = None,
             fix_layers: list = [],
-            num_rnd_layers: int = 2,
             gamma: int = 64,
+            mlp_random_init: bool = False,
             draft_kwargs: dict = {"use_draft": False}):
 
         super().__init__()
         self.decoder = decoder
         self.enable_lora = False
         self.fix_layers = fix_layers
-        self.num_rnd_layers = num_rnd_layers
         self.draft_kwargs = draft_kwargs
 
         # 修改各种forward函数
@@ -286,10 +335,12 @@ class Decoder(torch.nn.Module):
                     rot_mats.append(random_rotation_matrix(dim=128, **info))
                 return torch.stack(rot_mats, dim=0).unsqueeze(0)
 
+            get_init_value = lambda: torch.randn((1,32,128,128), **info) if mlp_random_init else get_rot_mat()
+
             if not layer.self_attn.is_fix_layer:
-                layer.self_attn.rot_mat1 = torch.nn.Parameter(get_rot_mat(), requires_grad=True)
+                layer.self_attn.rot_mat1 = torch.nn.Parameter(get_init_value(), requires_grad=True)
                 layer.self_attn.relu1 = torch.nn.SiLU()
-                layer.self_attn.rot_mat2 = torch.nn.Parameter(get_rot_mat(), requires_grad=True)
+                layer.self_attn.rot_mat2 = torch.nn.Parameter(get_init_value(), requires_grad=True)
 
 
     def is_benchmark_mode(self):
@@ -408,19 +459,19 @@ class LlamaGenAcc19(Modifier):
         assert isinstance(self.conf, dict)
         enable_lora = self.conf["enable_lora"]
         lora_kwargs = self.conf["lora_kwargs"]
-
         draft_kwargs = self.conf['draft_kwargs']
-        fix_layers = [] if "fix_layers" not in self.conf else self.conf["fix_layers"]
-        num_rnd_layers = None if "num_rnd_layers" not in self.conf else self.conf['num_rnd_layers']
-        gamma = 64 if "gamma" not in self.conf else self.conf["gamma"]
+        
+        fix_layers = self.conf.get('fix_layers', [])
+        gamma = self.conf.get('gamma', 64)
+        mlp_random_init = self.conf.get('mlp_random_init', False) 
         
         decoder = Decoder(
             model, 
             enable_lora=enable_lora,
             lora_kwargs=lora_kwargs,
             fix_layers=fix_layers,
-            num_rnd_layers=num_rnd_layers,
             gamma=gamma,
+            mlp_random_init=mlp_random_init,
             draft_kwargs=draft_kwargs)
 
         decoder = Model(decoder)

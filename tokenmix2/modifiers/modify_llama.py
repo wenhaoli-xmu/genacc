@@ -79,6 +79,21 @@ def check_and_apply_qk_rope(query, key, cos, sin):
     return Q, K
 
 
+def check_and_apply_qk_rope_random_query(query, key, cos, sin, query_index: torch.LongTensor):
+    batch_size, num_heads, num_query, head_dim = query.shape
+    num_kv = key.shape[-2]
+
+    assert key.shape == (batch_size, num_heads, num_kv, head_dim)
+    assert query_index.ndim == 1, f"{query_index.shape}"
+
+    new_posid_spec = partial(new_posid, device=query.device, dtype=query.dtype, bsz=batch_size)
+
+    Q = apply_rotary_pos_emb(query, cos, sin, new_posid_spec(num_kv)[:,query_index])
+    K = apply_rotary_pos_emb(key, cos, sin, new_posid_spec(num_kv))
+
+    return Q, K
+
+
 def check_and_apply_rope(query, key, value, cos, sin):
     batch_size, num_heads, num_query, head_dim = query.shape
     num_kv = key.shape[-2]

@@ -289,24 +289,19 @@ def get_modifier(method: str, model_type):
     
     elif method == 'genacc20':
         """
-        * genacc19的evaluation版本
+        * genacc19的evaluation版本, evaluation pre-filling阶段
+        * 可以用于lm_eval, perpelxity, mmlu等测试
         """
         from .modify_llama_genacc20 import LlamaGenAcc20
         return None, LlamaGenAcc20
 
     elif method == 'genacc21':
         """
-        * 使用了up proj & down proj的MLP predictor + set prediction loss
+        * genacc19的evaluation版本, 可以evaluate generation阶段
+        * 可用于文本生成 (调用model.generate), 比如longbench数据集, needle in haystack, ruler数据集等
         """
         from .modify_llama_genacc21 import LlamaGenAcc21
         return None, LlamaGenAcc21
-
-    elif method == 'genacc22':
-        """
-        * genacc21的evaluation版本
-        """
-        from .modify_llama_genacc22 import LlamaGenAcc22
-        return None, LlamaGenAcc22
 
     elif method == 'isorope':
         from .modify_llama_isorope import LlamaIsoRoPE

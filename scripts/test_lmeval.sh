@@ -1,4 +1,4 @@
-test_scripts=("maskout98.json" "maskout90.json" "llama2-7b.json")
+test_scripts=("maskout90.json")
 
 for test_script in "${test_scripts[@]}"
 do

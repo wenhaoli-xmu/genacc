@@ -10,6 +10,8 @@ __pycache__/
 train_cache/*
 train_results/*
 !train_results/convert.py
+buffer
+models
 
 # datasets
 mmlu/
