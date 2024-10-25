@@ -5,3 +5,5 @@ lm_eval==0.3.0
 pygments
 accelerate
 peft
+anthropic
+seaborn

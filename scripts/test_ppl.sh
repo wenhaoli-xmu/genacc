@@ -1,4 +1,9 @@
-test_scripts=("maskout_0.98.json" "maskout_0.95.json" "maskout_0.90.json" "maskout_0.80.json" "llama2-7b.json")
+test_scripts=(
+    "llama2-7b-chat.json" 
+    "llama2-7b-chat-maskout98.json" 
+    "llama2-7b-chat-maskout95.json"
+    "llama2-7b-chat-maskout90.json"
+    "llama2-7b-chat-maskout80.json")
 
 for test_script in "${test_scripts[@]}"
 do
