@@ -307,14 +307,21 @@ def train(args):
             dist.barrier()
             reset_buffer_dir()
 
-        # overall save
+        # 创建目录
         save_path = args.env_conf.split('/')[-1]
         if dist.get_rank() == 0:
             if not os.path.exists(f"train_results/{save_path}"):
                 os.mkdir(f"train_results/{save_path}")
         dist.barrier()
+
+        # 保存训练好的参数
         torch.save(params, f"train_results/{save_path}/{layer_idx}.pth")
         print(f"RANK-{args.local_rank} training done !")
+        dist.barrier()
+
+        # 清空缓存
+        del layer, optim
+        clear_cache(args.local_rank)
         dist.barrier()
 
 

@@ -5,7 +5,7 @@
         "enable": true,
         "mask_out": 0.98,
         "bench_mark": false,
-        "min_remain": 80
+        "min_remain": 40
     },
 
     "enable_lora": false,
