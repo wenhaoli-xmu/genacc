@@ -14,7 +14,8 @@ buffer
 models
 
 # datasets
-mmlu/
+mmlu/data
+mmlu/data.tar
 LongBench/
 raw_data/
 data/
