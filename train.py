@@ -309,8 +309,10 @@ def train(args):
 
         # overall save
         save_path = args.env_conf.split('/')[-1]
-        if not os.path.exists(f"train_results/{save_path}"):
-            os.mkdir(f"train_results/{save_path}")
+        if dist.get_rank() == 0:
+            if not os.path.exists(f"train_results/{save_path}"):
+                os.mkdir(f"train_results/{save_path}")
+        dist.barrier()
         torch.save(params, f"train_results/{save_path}/{layer_idx}.pth")
         print(f"RANK-{args.local_rank} training done !")
         dist.barrier()
