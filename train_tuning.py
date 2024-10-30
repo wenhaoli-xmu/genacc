@@ -17,7 +17,16 @@ from concurrent.futures import ThreadPoolExecutor
 import concurrent
 
 
-def compute_attn_supervise_loss(draft_attn, true_attn, query_index, max_top, max_oth, maskout):
+def compute_attn_supervise_loss(
+        draft_attn, 
+        true_attn, 
+        query_index, 
+        max_top, 
+        max_oth, 
+        maskout, 
+        beta: float = 1.0, 
+        margin: float = 0.0):
+
     loss = torch.tensor(0, dtype=torch.float32)
     criterion = torch.nn.BCEWithLogitsLoss()
 
@@ -51,7 +60,7 @@ def compute_attn_supervise_loss(draft_attn, true_attn, query_index, max_top, max
     residual = top_draft_attn - oth_draft_attn
     residual_mask = (top_mask | oth_mask).expand_as(residual).flatten(-3)
 
-    logits = residual.flatten(-3)[~residual_mask.bool()]
+    logits = residual.flatten(-3)[~residual_mask.bool()] * beta - margin
     labels = torch.ones_like(logits)
     loss += criterion(logits, labels).cpu()
 
@@ -115,11 +124,38 @@ def reset_buffer_dir():
     dist.barrier()
 
 
+def get_config_list(args):
+    import json
+    lr_list = json.loads(args.lr)
+    beta_list = json.loads(args.beta)
+    margin_list = json.loads(args.margin)
+    config_list = []
+
+    for lr in lr_list:
+        for beta in beta_list:
+            for margin in margin_list:
+                config = {
+                    "lr": lr,
+                    "beta": beta,
+                    "margin": margin}
+                config_list.append(config)
+        
+    return config_list
+
+
+def modify_env_conf(env_conf, config):
+    env_conf['train']['max_lr'] = config['lr']
+    return env_conf
+
+
 def train(args):
     deepspeed.init_distributed()
 
     # 计算一些变量 & 例行检查
     env_conf = get_env_conf(args.env_conf)
+    config_list = get_config_list(args)
+
+
     num_gpus = dist.get_world_size()
     if not os.path.exists("buffer"):
         os.mkdir("buffer")
@@ -127,22 +163,25 @@ def train(args):
         reset_buffer_dir()
 
     assert env_conf['train']['train_iters'] % args.instance_per_cycle == 0
-    assert args.num_layers % num_gpus == 0
+    assert len(config_list) % num_gpus == 0
     assert args.instance_per_cycle % args.prepare_batch_size_per_gpu == 0
     assert (args.instance_per_cycle // args.prepare_batch_size_per_gpu) % num_gpus == 0
     assert env_conf['model']['model_dtype'] in ('bf16', 'fp16')
 
     num_inn_cycle = env_conf['train']['train_iters'] // args.instance_per_cycle
-    num_out_cycle = args.num_layers // num_gpus
+    num_out_cycle = len(config_list) // num_gpus
 
     # 开始训练pipeline
     for out_cycle_idx in range(num_out_cycle):
         torch.manual_seed(42)
 
         # 加载模型 & tokenizer
-        layer_idx = out_cycle_idx * num_gpus + args.local_rank
-        layer_indices = [out_cycle_idx * num_gpus + i for i in range(num_gpus)]
+        layer_idx = args.fix_layer
+
         env_conf["model"]["device_map"] = {"": args.local_rank}
+        config = config_list[args.local_rank + out_cycle_idx * num_gpus]
+        env_conf = modify_env_conf(env_conf, config)
+        
         tokenizer, model = get_model_and_tokenizer(**env_conf['model'])
 
         # 将模型只保存某个layer
@@ -189,7 +228,9 @@ def train(args):
             compute_attn_supervise_loss,
             max_top=args.max_top, 
             max_oth=args.max_oth,
-            maskout=args.maskout)
+            maskout=args.maskout,
+            beta=config['beta'],
+            margin=config['margin'])
 
         for inn_cycle_idx in range(num_inn_cycle):
 
@@ -198,23 +239,24 @@ def train(args):
             model.eval()
 
             increment = num_gpus * args.prepare_batch_size_per_gpu
-            executor = ThreadPoolExecutor(max_workers=args.max_prepare_workers)
-            futures = []
 
-            for idx in tqdm.tqdm(range(0, args.instance_per_cycle, increment)):
+            if args.local_rank == 0:
+                executor = ThreadPoolExecutor(max_workers=args.max_prepare_workers)
+                futures = []
+            dist.barrier()
+
+            for idx in tqdm.tqdm(range(0, args.instance_per_cycle, increment), disable=True):
                 inputs = next(data_iter)
                 length = inputs.get("input_len")
                 inputs.update({"return_inputs": True})
 
                 #前向传播 & 获取每层的输入数据
                 outputs = model(**inputs)
-                inputs = [outputs.hidden_states[i].cuda(args.local_rank) for i in layer_indices]
-                inputs = torch.stack(inputs, dim=0)
+                inputs = outputs.hidden_states[args.fix_layer].cuda(args.local_rank)
 
                 # 进程之间通信-1, 交换padded input hidden states
                 inputs_gather = [torch.empty_like(inputs) for _ in range(num_gpus)]
                 dist.all_gather(inputs_gather, inputs)
-                inputs_gather = [inputs[args.local_rank] for inputs in inputs_gather]
                 inputs_gather = torch.cat(inputs_gather, dim=0).cpu()
 
                 # 进程之间通信-2, 交换input hidden states的尺寸
@@ -224,14 +266,16 @@ def train(args):
                 length_gather = torch.cat(length_gather)
 
                 # 保存数据
-                buffer = (inputs_gather, length_gather)
-                buffer_file = f"buffer/inputs_buffer_rank_{args.local_rank}_{idx:05d}.pt"
+                if args.local_rank == 0:
+                    buffer = (inputs_gather, length_gather)
+                    buffer_file = f"buffer/inputs_buffer_{idx:06d}.pt"
 
-                future = executor.submit(torch.save, buffer, buffer_file)
-                futures.append(future)
-                if len(futures) >= args.max_prepare_workers:
-                    concurrent.futures.wait(futures)
-                    futures = []
+                    future = executor.submit(torch.save, buffer, buffer_file)
+                    futures.append(future)
+                    if len(futures) >= args.max_prepare_workers:
+                        concurrent.futures.wait(futures)
+                        futures = []
+                dist.barrier()
 
             # 先准备好数据的进程等待未准备完成的进程
             del model, inputs, outputs
@@ -241,7 +285,7 @@ def train(args):
             # 将buffer文件夹下的所有文件进行排序
             buffer_files = os.listdir("buffer")
             buffer_files = sorted(filter(
-                lambda x: x.startswith(f"inputs_buffer_rank_{args.local_rank}"), 
+                lambda x: x.startswith(f"inputs_buffer"),
                 buffer_files))
 
             # 先读取第1个数据
@@ -314,23 +358,20 @@ def train(args):
 
                 # 已经prefetch好的数据
                 inputs_gather, length_gather = future.result()
-
-            print(f"layer: {layer_idx}\tstep: {step}\tloss: {sum(history_loss) / len(history_loss):<.3f}\tdiff: {sum(history_diff) / len(history_diff):<.3f}", flush=True)
-            history_loss = []
-            history_diff = []
             
             clear_cache(args.local_rank)
             dist.barrier()
             reset_buffer_dir()
 
-        # overall save
-        save_path = args.env_conf.split('/')[-1]
-        if dist.get_rank() == 0:
-            if not os.path.exists(f"train_results/{save_path}"):
-                os.mkdir(f"train_results/{save_path}")
-        dist.barrier()
-        torch.save(params, f"train_results/{save_path}/{layer_idx}.pth")
-        print(f"RANK-{args.local_rank} training done !")
+        history_loss = history_loss[-100:]
+        history_diff = history_diff[-100:]
+
+        info = {
+            "config": {config},
+            "loss": f"{sum(history_loss) / len(history_loss):<.3f}",
+            "diff": f"{sum(history_diff) / len(history_diff):<.3f}"
+        }
+        print(info, flush=True)
         dist.barrier()
 
 
@@ -338,7 +379,11 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
     # 和模型结构有关的参数，需要根据模型的不同而相应地调整
-    parser.add_argument("--num_layers", type=int, default=32)
+    parser.add_argument("--fix_layer", type=int, default=2)
+    parser.add_argument("--lr", type=str, default="[0.1,0.01,0.001,0.0001]")
+    parser.add_argument("--beta", type=str, default="[0.3,1,3]")
+    parser.add_argument("--margin", type=str, default="[0.3,1,3]")
+
     parser.add_argument("--max_tokens", type=int, default=4096)
     parser.add_argument("--hidden_size", type=int, default=4096)
     parser.add_argument("--maskout", type=float, default=0.98)
