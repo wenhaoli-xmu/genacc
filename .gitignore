@@ -16,6 +16,7 @@ models
 # datasets
 mmlu/data
 mmlu/data.tar
+mmlu/output
 LongBench/
 raw_data/
 data/
