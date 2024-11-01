@@ -15,6 +15,7 @@ import argparse
 
 from concurrent.futures import ThreadPoolExecutor
 import concurrent
+import json
 
 
 def compute_attn_supervise_loss(
@@ -240,9 +241,8 @@ def train(args):
 
             increment = num_gpus * args.prepare_batch_size_per_gpu
 
-            if args.local_rank == 0:
-                executor = ThreadPoolExecutor(max_workers=args.max_prepare_workers)
-                futures = []
+            executor = ThreadPoolExecutor(max_workers=args.max_prepare_workers)
+            futures = []
             dist.barrier()
 
             for idx in tqdm.tqdm(range(0, args.instance_per_cycle, increment), disable=True):
@@ -367,7 +367,7 @@ def train(args):
         history_diff = history_diff[-100:]
 
         info = {
-            "config": {config},
+            "config": json.dumps(config),
             "loss": f"{sum(history_loss) / len(history_loss):<.3f}",
             "diff": f"{sum(history_diff) / len(history_diff):<.3f}"
         }
