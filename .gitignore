@@ -24,6 +24,6 @@ pred_e
 
 # misc
 *.egg-info
-tokenmix2/**/*.pyc
+**/*.pyc
 lm-corpus
 lm-profiler
