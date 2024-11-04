@@ -303,6 +303,13 @@ def get_modifier(method: str, model_type):
         from .modify_llama_genacc21 import LlamaGenAcc21
         return None, LlamaGenAcc21
 
+    elif method == 'genacc22':
+        """
+        * genacc22是genacc21的升级版, 理论上对整个过程有加速
+        """
+        from .modify_llama_genacc22 import LlamaGenAcc22
+        return None, LlamaGenAcc22
+
     elif method == 'isorope':
         from .modify_llama_isorope import LlamaIsoRoPE
         return None, LlamaIsoRoPE

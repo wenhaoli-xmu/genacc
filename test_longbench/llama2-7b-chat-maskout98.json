@@ -2,7 +2,7 @@
     "model": {
         "model_name": "meta-llama/Llama-2-7b-chat-hf",
         "model_dtype": "fp16",
-        "model_method": "genacc21",
+        "model_method": "genacc22",
         "model_structure": null,
         "save_ckp": "ckp/genacc19-11.pth",
         "load_ckp": null,

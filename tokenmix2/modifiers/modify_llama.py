@@ -65,16 +65,17 @@ def new_posid(num_token: int, device, dtype, bsz):
     return appendix
 
 
-def check_and_apply_qk_rope(query, key, cos, sin):
+def check_and_apply_qk_rope(query, key, cos, sin, pos=0):
     batch_size, num_heads, num_query, head_dim = query.shape
     num_kv = key.shape[-2]
 
     assert key.shape == (batch_size, num_heads, num_kv, head_dim)
 
     new_posid_spec = partial(new_posid, device=query.device, dtype=query.dtype, bsz=batch_size)
+    pos_list = new_posid_spec(max(num_kv, pos))
 
-    Q = apply_rotary_pos_emb(query, cos, sin, new_posid_spec(num_kv)[:,-num_query:])
-    K = apply_rotary_pos_emb(key, cos, sin, new_posid_spec(num_kv))
+    Q = apply_rotary_pos_emb(query, cos, sin, pos_list[:,-num_query:])
+    K = apply_rotary_pos_emb(key, cos, sin, pos_list[:,-num_kv:])
 
     return Q, K
 
