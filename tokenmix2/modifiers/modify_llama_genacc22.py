@@ -1,13 +1,14 @@
 import torch
 import types
 from .modify_llama import check_and_apply_qk_rope
-from transformers.models.llama.modeling_llama import CausalLMOutputWithPast, repeat_kv, CrossEntropyLoss
+from transformers.models.llama.modeling_llama import repeat_kv, CausalLMOutputWithPast, CrossEntropyLoss
 from ..modifier import Modifier
 from peft import get_peft_model, LoraConfig, TaskType
 
 from typing import List, Tuple, Optional
 from dataclasses import dataclass
 from contextlib import contextmanager
+import numpy as np
 
 
 @contextmanager
@@ -64,35 +65,34 @@ class Genacc22Output(CausalLMOutputWithPast):
 #     diff = total_diff / total_compare
 #     print(f"diff: {diff.item():<.3f}")
 # ================================================================================================================================
+    
 
+def get_hash_code(x_after_rope, rot_mat1, rot_mat2, relu, return_np=True):
 
+    assert x_after_rope.ndim == 4, f"Expect input tensor of 4 dimensionality, got {x_after_rope.shape}"
+    assert x_after_rope.shape[-1] % 8 == 0, f"Expect last dimension of `x_after_rope` divisible by 8, got {x_after_rope.shape}"
 
-def get_hash_code(x_after_rope, rot_mat1, rot_mat2, relu):
 
     def pack_bits(bits_tensor):
+        meta = {"dtype": bits_tensor.dtype, "device": bits_tensor.device}
+
         bit_chunks = bits_tensor.unflatten(-1, (-1, 8))
-        bit_mask = torch.tensor([1 << i for i in range(8)])[None, None, None, :]
-        packed_bytes = (bit_chunks * bit_mask).sum(dim=1)
+        bit_mask = torch.tensor([1 << i for i in range(8)], **meta)[None, None, None, None, :]
+        packed_bytes = (bit_chunks * bit_mask).sum(dim=-1)
+
         return packed_bytes
 
-    x_after_rope = (relu(x_after_rope @ rot_mat1) @ rot_mat2 > 0 > 0).type(torch.uint8)
-    x_after_rope = pack_bits(x_after_rope)
-
-    return x_after_rope
-
+    x_after_rope = relu(x_after_rope @ rot_mat1) @ rot_mat2 > 0
+    x_after_rope = x_after_rope.type(torch.uint8)
+    return pack_bits(x_after_rope)
 
 
-def lsh_attn(q_hash, k_hash):
-
-    import IPython
-    IPython.embed(header='debug')
-
+def lsh_attn(q_hash, k_hash, return_np=True):
+    meta = {"dtype": k_hash.dtype, "device": k_hash.device}
     sim = torch.bitwise_not(torch.bitwise_xor(q_hash, k_hash))
-    bit_count_table = torch.tensor([bin(i).count('1') for i in range(256)], dtype=torch.uint8)
+    bit_count_table = torch.tensor([bin(i).count('1') for i in range(256)], **meta)
     count_of_ones = bit_count_table[sim]
-    sim = count_of_ones.sum(dim=-1)
-
-    return sim
+    return count_of_ones.sum(dim=-1)
 
 
 def random_rotation_matrix(dim, dtype, device):
@@ -237,25 +237,30 @@ def self_attn_forward(
     cos, sin = self.rotary_emb(vals, seq_len=seq_len)
     ques, keys = check_and_apply_qk_rope(ques, keys, cos=cos, sin=sin, pos=seq_len)
 
-    # resume full kv historty
+    # qk hashing
+    q_hash, k_hash = None, None
+    if do_sparse_attn:
+        if is_prefill:
+            k_hash = get_hash_code(keys, self.rot_mat1, self.rot_mat2, self.relu1)
+        else:
+            assert k_hash_cache is not None, f"`k_hash_cache` is required in the decoding phase."
+
+            q_hash = get_hash_code(ques, self.rot_mat1, self.rot_mat2, self.relu1)
+            k_hash = get_hash_code(keys, self.rot_mat1, self.rot_mat2, self.relu1)
+
+        if k_hash_cache is not None:
+            k_hash = torch.cat([k_hash_cache, k_hash], dim=-2)
+
+        # key hash related things
+        k_hash_cache = k_hash
+        k_hash = repeat_kv(k_hash, num_kv_group)
+
+    # kv cache related things
     if kv_cache is not None:
         key_cache, val_cache = kv_cache
         keys = torch.cat([key_cache, keys], dim=-2)
         vals = torch.cat([val_cache, vals], dim=-2)
     kv_cache = (keys.data, vals.data)
-
-    # do key hash 
-    q_hash, k_hash = None, None
-
-    if do_sparse_attn:
-        if is_prefill:
-            k_hash_cache = get_hash_code(keys, self.rot_mat1, self.rot_mat2, self.relu)
-        else:
-            assert k_hash_cache is not None, f"`k_hash_cache` is required in the decoding phase."
-            q_hash = get_hash_code(ques, self.rot_mat1, self.rot_mat2, self.relu)
-            k_hash = get_hash_code(keys, self.rot_mat1, self.rot_mat2, self.relu)
-            k_hash = torch.cat([k_hash_cache, k_hash], dim=-2)
-            k_hash_cache = k_hash.data
 
     # for MQA models
     keys = repeat_kv(keys, num_kv_group)
@@ -273,10 +278,9 @@ def self_attn_forward(
         num_remain = num_kv_pair - int(num_kv_pair * self.draft_kwargs['mask_out'])
         num_remain = max(min(num_kv_pair, self.draft_kwargs['min_remain']), num_remain)
 
-        # topk retrieval
-        remain_indices = low_precision_attn.topk(k=num_remain, dim=-1).indices
-        keys_subset = torch.gather(keys, dim=-1, index=remain_indices)
-        vals_subset = torch.gather(vals, dim=-1, index=remain_indices)
+        remain_indices = low_precision_attn.topk(k=num_remain, dim=-1).indices.unsqueeze(-1).expand(-1,-1,-1,keys.shape[-1])
+        keys_subset = torch.gather(keys, dim=-2, index=remain_indices)
+        vals_subset = torch.gather(vals, dim=-2, index=remain_indices)
 
         # =========================================================================================================
         # NOTE: test
@@ -322,7 +326,7 @@ def self_attn_forward(
             query=ques,
             key=keys,
             value=vals,
-            is_causal=True)
+            is_causal=is_prefill)
         
         attn_output = attn_output.transpose(1,2).flatten(2)
         return self.o_proj(attn_output), kv_cache, k_hash_cache
@@ -455,13 +459,15 @@ class Decoder(torch.nn.Module):
             self, 
             input_ids, 
             labels=None,
-            kv_cache=None):
+            kv_cache=None,
+            k_hash_cache=None):
 
         # decoder forward
         outputs = self.decoder(
             input_ids=input_ids, 
             labels=labels,
-            kv_cache=kv_cache)
+            kv_cache=kv_cache,
+            k_hash_cache=k_hash_cache)
 
         return outputs
 
@@ -489,6 +495,7 @@ class Model(torch.nn.Module):
             kv_cache=None,
             labels=None,
             local_rank=None,
+            k_hash_cache=None,
             **kwargs
         ):
 
@@ -496,14 +503,17 @@ class Model(torch.nn.Module):
             input_ids = torch.tensor(input_ids, dtype=torch.int64)[None, :]
             labels = torch.tensor(labels, dtype=torch.int64)[None, :]
 
+        # sign
         label_exist = labels is not None
         rank_exist = local_rank is not None
 
+        # maybe extend the dim of input_ids
         if input_ids.ndim == 3:
             input_ids = input_ids.flatten(0,1)
         if label_exist and labels.ndim == 3:
             labels = labels.flatten(0,1)
 
+        # put inputs-ids to the same device
         if rank_exist:
             device = torch.device(local_rank)
         else:
@@ -513,7 +523,8 @@ class Model(torch.nn.Module):
         outputs = self.decoder(
             input_ids, 
             labels=labels,
-            kv_cache=kv_cache)
+            kv_cache=kv_cache,
+            k_hash_cache=k_hash_cache)
 
         return outputs
 
@@ -562,6 +573,9 @@ class LlamaGenAcc22(Modifier):
 
     @torch.no_grad()
     def generate(self, input_ids, max_new_tokens=128, eos_token_id=[2], prof=None):
+
+        if isinstance(input_ids, list):
+            input_ids = torch.tensor(input_ids, dtype=torch.int64)[None, :]
 
         if input_ids.ndim == 3:
             input_ids = input_ids.flatten(0,1)

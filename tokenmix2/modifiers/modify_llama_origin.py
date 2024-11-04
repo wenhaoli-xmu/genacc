@@ -1,4 +1,5 @@
 from ..modifier import Modifier
+import torch
 
 
 class LlamaOrigin(Modifier):
