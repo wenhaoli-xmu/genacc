@@ -4,27 +4,25 @@ wandb/
 
 # checkpoints
 ckp/*
-*.pth
-*.pyc
-__pycache__/
-train_cache/*
+tokenmix2/**/*.pyc
 train_results/*
 !train_results/convert.py
-buffer
+buffer/
 models
 
 # datasets
 mmlu/data
 mmlu/data.tar
 mmlu/output
+mmlu/__pycache__
 LongBench/
 raw_data/
 data/
 data_cache/
 
 # misc
-*.egg-info/
-pred/
+*.egg-info
+pred
+pred_e
 lm-corpus
 lm-profiler
-*.pyc
