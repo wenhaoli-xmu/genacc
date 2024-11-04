@@ -2,12 +2,10 @@
 log/
 wandb/
 
-# checkpoints
+# checkpoints & model files
 ckp/*
-tokenmix2/**/*.pyc
 train_results/*
 !train_results/convert.py
-buffer/
 models
 
 # datasets
@@ -15,14 +13,17 @@ mmlu/data
 mmlu/data.tar
 mmlu/output
 mmlu/__pycache__
-LongBench/
-raw_data/
-data/
-data_cache/
+LongBench
+raw_data
+data
+buffer
+
+# outputs
+pred
+pred_e
 
 # misc
 *.egg-info
-pred
-pred_e
+tokenmix2/**/*.pyc
 lm-corpus
 lm-profiler
