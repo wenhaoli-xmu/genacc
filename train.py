@@ -17,7 +17,16 @@ from concurrent.futures import ThreadPoolExecutor
 import concurrent
 
 
-def compute_attn_supervise_loss(draft_attn, true_attn, query_index, max_top, max_oth, maskout):
+def compute_attn_supervise_loss(
+        draft_attn, 
+        true_attn, 
+        query_index, 
+        max_top, 
+        max_oth, 
+        maskout, 
+        beta: float = 1.0, 
+        margin: float = 0.0):
+
     loss = torch.tensor(0, dtype=torch.float32)
     criterion = torch.nn.BCEWithLogitsLoss()
 
@@ -51,7 +60,7 @@ def compute_attn_supervise_loss(draft_attn, true_attn, query_index, max_top, max
     residual = top_draft_attn - oth_draft_attn
     residual_mask = (top_mask | oth_mask).expand_as(residual).flatten(-3)
 
-    logits = residual.flatten(-3)[~residual_mask.bool()]
+    logits = residual.flatten(-3)[~residual_mask.bool()] * beta - margin
     labels = torch.ones_like(logits)
     loss += criterion(logits, labels).cpu()
 
@@ -189,7 +198,9 @@ def train(args):
             compute_attn_supervise_loss,
             max_top=args.max_top, 
             max_oth=args.max_oth,
-            maskout=args.maskout)
+            maskout=args.maskout,
+            beta=args.beta,
+            margin=args.margin)
 
         for inn_cycle_idx in range(num_inn_cycle):
 
@@ -349,6 +360,8 @@ if __name__ == '__main__':
     parser.add_argument("--max_tokens", type=int, default=4096)
     parser.add_argument("--hidden_size", type=int, default=4096)
     parser.add_argument("--maskout", type=float, default=0.98)
+    parser.add_argument("--beta", type=float, default=1.0)
+    parser.add_argument("--margin", type=float, default=-10.0)
 
     # 和模型无关的参数
     parser.add_argument("--env_conf", type=str, default=None)
