@@ -16,9 +16,19 @@ if __name__ == '__main__':
     for prompt_length in json.loads(args.prompt_length):
 
         input_ids = [42] * prompt_length
-        walltime = WallTime(f"{args.env_conf}/prompt-{prompt_length}", cuda=0)
+        walltime = WallTime(f"prompt-{prompt_length}", cuda=[0,1])
+        
+        WallTime("get_code", cuda=[0,1])
+        WallTime("lsh_attn", cuda=[0,1])
+        WallTime("sparse attn", cuda=[0,1])
+        WallTime("dense attn", cuda=[0,1])
 
-        for _ in range(10):
+        for _ in range(3):
             output = model.generate(input_ids, max_new_tokens=128, eos_token_id=[], prof=walltime)
 
         walltime.result(detail=True)
+        WallTime.get("get_code").result(detail=True)
+        WallTime.get("lsh_attn").result(detail=True)
+        WallTime.get("sparse attn").result(detail=True)
+        WallTime.get("dense attn").result(detail=True)
+        print("", end='\n\n')

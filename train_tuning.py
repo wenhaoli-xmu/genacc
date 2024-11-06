@@ -61,9 +61,9 @@ def compute_attn_supervise_loss(
     residual = top_draft_attn - oth_draft_attn
     residual_mask = (top_mask | oth_mask).expand_as(residual).flatten(-3)
 
-    logits = residual.flatten(-3)[~residual_mask.bool()] * beta - margin
+    logits = residual.flatten(-3)[~residual_mask.bool()]
     labels = torch.ones_like(logits)
-    loss += criterion(logits, labels).cpu()
+    loss += criterion(logits * beta - margin, labels).cpu()
 
     # 算一下排序误差
     diff = torch.count_nonzero(logits < 0) / logits.numel()

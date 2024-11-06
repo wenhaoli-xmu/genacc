@@ -9,6 +9,8 @@ from typing import List, Tuple, Optional
 from dataclasses import dataclass
 from contextlib import contextmanager
 import numpy as np
+from profiler import WallTime
+from lsh_kernel import lsh_attn_dx_u8
 
 
 @contextmanager
@@ -72,13 +74,12 @@ def get_hash_code(x_after_rope, rot_mat1, rot_mat2, relu, return_np=True):
     assert x_after_rope.ndim == 4, f"Expect input tensor of 4 dimensionality, got {x_after_rope.shape}"
     assert x_after_rope.shape[-1] % 8 == 0, f"Expect last dimension of `x_after_rope` divisible by 8, got {x_after_rope.shape}"
 
-
     def pack_bits(bits_tensor):
         meta = {"dtype": bits_tensor.dtype, "device": bits_tensor.device}
 
         bit_chunks = bits_tensor.unflatten(-1, (-1, 8))
         bit_mask = torch.tensor([1 << i for i in range(8)], **meta)[None, None, None, None, :]
-        packed_bytes = (bit_chunks * bit_mask).sum(dim=-1)
+        packed_bytes = (bit_chunks * bit_mask).sum(dim=-1).to(**meta)
 
         return packed_bytes
 
@@ -245,8 +246,9 @@ def self_attn_forward(
         else:
             assert k_hash_cache is not None, f"`k_hash_cache` is required in the decoding phase."
 
-            q_hash = get_hash_code(ques, self.rot_mat1, self.rot_mat2, self.relu1)
-            k_hash = get_hash_code(keys, self.rot_mat1, self.rot_mat2, self.relu1)
+            with WallTime.get("get_code"):
+                q_hash = get_hash_code(ques, self.rot_mat1, self.rot_mat2, self.relu1)
+                k_hash = get_hash_code(keys, self.rot_mat1, self.rot_mat2, self.relu1)
 
         if k_hash_cache is not None:
             k_hash = torch.cat([k_hash_cache, k_hash], dim=-2)
@@ -271,7 +273,8 @@ def self_attn_forward(
         assert ques.shape[-2] == 1, f"The number of queries in the decoding phase should always be 1 rather than {ques.shape[-2]}"
 
         # low precision attention based on NXOR similarity
-        low_precision_attn = lsh_attn(q_hash, k_hash)
+        with WallTime.get("lsh_attn"):
+            low_precision_attn = lsh_attn_dx_u8(q_hash, k_hash)
 
         # calculate the number of kv pairs to maintain
         num_kv_pair = low_precision_attn.shape[-1]
@@ -313,20 +316,22 @@ def self_attn_forward(
         #         self.ratios.append(sum(ratios) / len(ratios))
         # ==================================================================================
 
-        attn_output = torch.nn.functional.scaled_dot_product_attention(
-            query=ques,
-            key=keys_subset,
-            value=vals_subset)
+        with WallTime.get("sparse attn"):
+            attn_output = torch.nn.functional.scaled_dot_product_attention(
+                query=ques,
+                key=keys_subset,
+                value=vals_subset)
 
         attn_output = attn_output.transpose(1,2).flatten(2)
         return self.o_proj(attn_output), kv_cache, k_hash_cache
 
     else:
-        attn_output = torch.nn.functional.scaled_dot_product_attention(
-            query=ques,
-            key=keys,
-            value=vals,
-            is_causal=is_prefill)
+        with WallTime.get("dense attn" if not is_prefill else ""):
+            attn_output = torch.nn.functional.scaled_dot_product_attention(
+                query=ques,
+                key=keys,
+                value=vals,
+                is_causal=is_prefill)
         
         attn_output = attn_output.transpose(1,2).flatten(2)
         return self.o_proj(attn_output), kv_cache, k_hash_cache
@@ -572,7 +577,7 @@ class LlamaGenAcc22(Modifier):
 
 
     @torch.no_grad()
-    def generate(self, input_ids, max_new_tokens=128, eos_token_id=[2], prof=None):
+    def generate(self, input_ids, kv_cache=None, max_new_tokens=128, eos_token_id=[2], prof=None):
 
         if isinstance(input_ids, list):
             input_ids = torch.tensor(input_ids, dtype=torch.int64)[None, :]

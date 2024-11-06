@@ -12,7 +12,7 @@ models
 mmlu/data
 mmlu/data.tar
 mmlu/output
-mmlu/__pycache__
+**/__pycache__
 LongBench
 raw_data
 data
@@ -24,6 +24,7 @@ pred_e
 
 # misc
 *.egg-info
-**/*.pyc
+*.pyc
 lm-corpus
 lm-profiler
+lsh_kernel
