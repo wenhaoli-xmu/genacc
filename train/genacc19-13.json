@@ -11,7 +11,7 @@
     },
 
     "train": {
-        "train_iters": 8000,
+        "train_iters": 6000,
         "max_lr": 0.001,
         "warmup": 0.01,
         "beta1": 0.9,

@@ -257,7 +257,7 @@ def self_attn_forward(
     kv_cache = (keys.data, vals.data)
     ret_attn = (None, None)
 
-    cos, sin = self.rotary_emb(vals, seq_len=4096)
+    cos, sin = self.rotary_emb(vals, seq_len=8192)
     cond1 = self.draft_kwargs['enable'] is True
     cond2 = not self.is_fix_layer
 

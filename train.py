@@ -148,21 +148,24 @@ def train(args):
     for out_cycle_idx in range(num_out_cycle):
         torch.manual_seed(42)
 
-        # 加载模型 & tokenizer
-        layer_idx = out_cycle_idx * num_gpus + args.local_rank
-        layer_indices = [out_cycle_idx * num_gpus + i for i in range(num_gpus)]
-        env_conf["model"]["device_map"] = {"": args.local_rank}
-        tokenizer, model = get_model_and_tokenizer(**env_conf['model'])
+        for gpu_id in range(num_gpus):
+            if args.local_rank == gpu_id:
+                # 加载模型 & tokenizer
+                layer_idx = out_cycle_idx * num_gpus + args.local_rank
+                layer_indices = [out_cycle_idx * num_gpus + i for i in range(num_gpus)]
+                env_conf["model"]["device_map"] = {"": args.local_rank}
+                tokenizer, model = get_model_and_tokenizer(**env_conf['model'])
 
-        # 将模型只保存某个layer
-        model.train()
-        model.freeze_model()
-        model.unfreeze_model()
-        layer = model.dump_as_attn_modules()[layer_idx]
-        params = model.layer_ft_params(layer_idx)
-        del model
-        clear_cache(args.local_rank)
-        print(f"RANK-{args.local_rank} training started !")
+                # 将模型只保存某个layer
+                model.train()
+                model.freeze_model()
+                model.unfreeze_model()
+                layer = model.dump_as_attn_modules()[layer_idx]
+                params = model.layer_ft_params(layer_idx)
+                del model
+                clear_cache(args.local_rank)
+                print(f"RANK-{args.local_rank} training started !")
+            dist.barrier()
 
         # 构造数据集
         corpus = build_dataset(env_conf, tokenizer)
@@ -205,8 +208,11 @@ def train(args):
         for inn_cycle_idx in range(num_inn_cycle):
 
             # 加载数据准备模型
-            _, model = get_model_and_tokenizer(**env_conf['model'])
-            model.eval()
+            for gpu_id in range(num_gpus):
+                if args.local_rank == gpu_id:
+                    _, model = get_model_and_tokenizer(**env_conf['model'])
+                    model.eval()
+                dist.barrier()
 
             increment = num_gpus * args.prepare_batch_size_per_gpu
             executor = ThreadPoolExecutor(max_workers=args.max_prepare_workers)

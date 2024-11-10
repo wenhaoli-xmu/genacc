@@ -4,7 +4,7 @@
         "model_dtype": "fp16",
         "model_method": "genacc20",
         "model_structure": null,
-        "save_ckp": "ckp/genacc19-12.pth",
+        "save_ckp": "ckp/genacc19-13.pth",
         "load_ckp": null,
         "config": "config/maskout90.json",
         "device_map": null
