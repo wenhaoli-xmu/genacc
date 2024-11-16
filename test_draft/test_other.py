@@ -21,11 +21,11 @@ if __name__ == '__main__':
     def get_color(value):
         from pygments.console import colorize
         if value > 75:
-            return colorize("green", f"{value: 2d}")
+            return colorize("green", f"{value:>4d}")
         elif value > 50:
-            return colorize("yellow", f"{value: 2d}")
+            return colorize("yellow", f"{value:>4d}")
         else:
-            return colorize("red", f"{value: 2d}")
+            return colorize("red", f"{value:>4d}")
 
     def callback(outputs):
         if not model.model.decoder.is_benchmark_mode():
@@ -36,14 +36,14 @@ if __name__ == '__main__':
 
         print("      ", end='')
         for head_id in range(num_heads):
-            print(f'#{head_id:<2}', end=' ')
+            print(f'#{head_id:>4d}', end=' ')
         print(f"avg", end=None)
 
         mean_ratios = [[] for _ in range(num_heads + 1)]
 
         for idx, layer_ratio in enumerate(ratios):
             if layer_ratio is not None:
-                print(f"{idx: >3}", end=': ')
+                print(f"{idx:>4d}", end=': ')
                 for hid, head_ratio in enumerate(layer_ratio):
                     value = int(head_ratio * 100)
                     print(get_color(value), end=' ')

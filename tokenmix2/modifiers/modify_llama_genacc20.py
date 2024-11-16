@@ -54,7 +54,20 @@ def log_diffs(true_attn, draft_attn, layer_idx):
     print(f"diff: {diff.item():<.3f}")
 
 
-def get_attn_score_using_angle_lsh(query, key, rot_mat1, rot_mat2, relu, cos, sin):
+def get_attn_score_using_angle_lsh(query, key, rot_mat, cos, sin):
+    query, key = check_and_apply_qk_rope(query, key, cos, sin)
+
+    q_inner = query @ rot_mat
+    k_inner = key @ rot_mat
+
+    q_hash = torch.sign(q_inner)
+    k_hash = torch.sign(k_inner)
+
+    sim = q_hash @ k_hash.transpose(-1,-2)
+    return sim
+
+
+def get_attn_score_using_mlp(query, key, rot_mat1, rot_mat2, relu, cos, sin):
     query, key = check_and_apply_qk_rope(query, key, cos, sin)
 
     q_inner = relu(query @ rot_mat1) @ rot_mat2
@@ -266,6 +279,12 @@ def self_attn_forward(
         draft_score = get_attn_score_using_angle_lsh(
             query=ques, 
             key=keys, 
+            rot_mat=self.rot_mat,
+            cos=cos, 
+            sin=sin
+        ) if self.draft_kwargs.get('use_mlp', True) is False else get_attn_score_using_mlp(
+            query=ques, 
+            key=keys, 
             rot_mat1=self.rot_mat1,
             rot_mat2=self.rot_mat2, 
             relu=self.relu1, 
@@ -298,26 +317,19 @@ def self_attn_forward(
 
         # =========================================================================================================
         # NOTE: test
-        # if self.draft_kwargs['bench_mark']:
+        if self.draft_kwargs['bench_mark']:
+            # 2.5 run benchmark to evaluate the performance of draft strategy
+            true_score = get_attn_score(query=ques, key=keys, cos=cos, sin=sin)
+            true_indices = aggregate_topk(true_score, num_remain)
+            self.ratios = []
 
-        #     # 2.5 run benchmark to evaluate the performance of draft strategy
-        #     true_score = get_attn_score(query=ques, key=keys, cos=cos, sin=sin)
-        #     true_indices = aggregate_topk(true_score, num_remain)
-        #     self.ratios = []
-
-        #     for draft_head, true_head in zip(draft_indices[0], true_indices[0]):
-        #         ratios = []
-
-        #         for qid, (draft_query, true_query) in enumerate(zip(draft_head, true_head)):
-        #             draft_set = set(draft_query[:qid + 1].tolist())
-        #             true_set = set(true_query[:qid + 1].tolist())
-
-        #             intersect = draft_set.intersection(true_set)
-        #             union = draft_set.union(true_set)
-        #             ratio = len(intersect) / len(union)
-        #             ratios.append(ratio)
-                
-        #         self.ratios.append(sum(ratios) / len(ratios))
+            for draft_head, true_head in zip(draft_indices[0,:,-1,:], true_indices[0,:,-1,:]):
+                draft_set = set(draft_head.tolist())
+                true_set = set(true_head.tolist())
+                intersect = draft_set.intersection(true_set)
+                union = draft_set.union(true_set)
+                ratio = len(intersect) / len(union)
+                self.ratios.append(ratio)
         # =========================================================================================================
 
 
@@ -429,9 +441,12 @@ class Decoder(torch.nn.Module):
                 return torch.stack(rot_mats, dim=0).unsqueeze(0)
 
             if not layer.self_attn.is_fix_layer:
-                layer.self_attn.rot_mat1 = torch.nn.Parameter(get_rot_mat(), requires_grad=True)
-                layer.self_attn.relu1 = torch.nn.SiLU()
-                layer.self_attn.rot_mat2 = torch.nn.Parameter(get_rot_mat(), requires_grad=True)
+                if draft_kwargs.get('use_mlp', True):
+                    layer.self_attn.rot_mat1 = torch.nn.Parameter(get_rot_mat(), requires_grad=True)
+                    layer.self_attn.relu1 = torch.nn.SiLU()
+                    layer.self_attn.rot_mat2 = torch.nn.Parameter(get_rot_mat(), requires_grad=True)
+                else:
+                    layer.self_attn.rot_mat = torch.nn.Parameter(get_rot_mat(), requires_grad=True)
 
 
     def is_benchmark_mode(self):
@@ -461,7 +476,7 @@ class Decoder(torch.nn.Module):
         layer = self.layers[layer]
         if layer.self_attn.is_fix_layer:
             return []
-        return [layer.self_attn.rot_mat1, layer.self_attn.rot_mat2]
+        return [layer.self_attn.rot_mat1, layer.self_attn.rot_mat2] if draft_kwargs.get('use_mlp', True) else [layer.self_attn.rot_mat]
 
 
     def ft_params(self):
@@ -472,6 +487,8 @@ class Decoder(torch.nn.Module):
                 params += [
                     layer.self_attn.rot_mat1,
                     layer.self_attn.rot_mat2,
+                ] if draft_kwargs.get('use_mlp', True) else [
+                    layer.self_attn.rot_mat
                 ]
 
         return params

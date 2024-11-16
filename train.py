@@ -104,6 +104,9 @@ def clear_cache(local_rank, max_trial=10):
 
 
 def collate_fn(batch, pad_token_id, max_tokens):
+    if pad_token_id is None:
+        pad_token_id = 0
+
     input_ids = [x.get('input_ids') for x in batch]
     input_len = [len(x) for x in input_ids]
 
@@ -185,7 +188,7 @@ def train(args):
             collate_fn=partial_collate_fn)
         data_iter = iter(loader)
         sampler.set_epoch(0)
-        
+
         # 构造优化器 & 学习率调节器
         optim, lr_adjust = get_optimizer_and_lr_adjuster(**env_conf['train'], params=params)
         
@@ -219,6 +222,7 @@ def train(args):
             futures = []
 
             for idx in tqdm.tqdm(range(0, args.instance_per_cycle, increment)):
+
                 inputs = next(data_iter)
                 length = inputs.get("input_len")
                 inputs.update({"return_inputs": True})

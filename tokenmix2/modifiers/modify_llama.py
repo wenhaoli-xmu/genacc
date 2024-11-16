@@ -427,7 +427,10 @@ def do_draft_attn_via_down_proj_sigmoid(query, key, q_down, k_down, cos, sin, re
     K = K.transpose(1,2).flatten(2) @ k_down
     K = K.unflatten(-1, (num_heads, -1)).transpose(1,2)
 
-    draft_attn = Q @ K.transpose(-1,-2)
+    Q = Q.flatten(0, 1)
+    K = K.flatten(0, 1)
+
+    draft_attn = torch.bmm(Q, K.transpose(-1,-2)).unflatten(0, (-1, num_heads))
 
     return draft_attn, true_attn
 

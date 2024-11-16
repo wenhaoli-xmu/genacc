@@ -9,6 +9,12 @@ if __name__ == '__main__':
     parser.add_argument("--env_conf", type=str, default=None)
     parser.add_argument("--use_env_conf_tasks", action="store_true", default=False)
     parser.add_argument('--rmt', action='store_true', default=False)
+
+    # Quest related arguments (https://arxiv.org/pdf/2406.10774)
+    parser.add_argument('--enable_quest', action='store_true')
+    parser.add_argument('--token_budget', type=int, default=1024, help='only used in quest')
+    parser.add_argument('--chunk_size', type=int, default=16, help='only used in quest')
+
     args = parser.parse_args()
 
     env_conf = get_env_conf(args.env_conf)
@@ -16,6 +22,11 @@ if __name__ == '__main__':
 
     tokenizer, model = get_model_and_tokenizer(**env_conf["model"])
     model.eval()
+
+    if args.enable_quest:
+        from quest.evaluation.quest_attention import enable_quest_attention_eval
+        enable_quest_attention_eval(model.model, args)
+
 
     ckp_file = env_conf['model']['save_ckp']
     if os.path.exists(ckp_file):
