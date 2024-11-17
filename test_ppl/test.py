@@ -1,6 +1,6 @@
 from tokenmix2.misc import get_model_and_tokenizer
 from tokenmix2.misc import get_env_conf
-from tokenmix2.misc import Evaluator, RMTEvaluator, ENCEvaluator
+from tokenmix2.misc import Evaluator, RMTEvaluator, QuestEvaluator
 import argparse, os
 
 
@@ -11,7 +11,7 @@ if __name__ == '__main__':
     parser.add_argument('--rmt', action='store_true', default=False)
 
     # Quest related arguments (https://arxiv.org/pdf/2406.10774)
-    parser.add_argument('--enable_quest', action='store_true')
+    parser.add_argument('--quest', action='store_true')
     parser.add_argument('--token_budget', type=int, default=1024, help='only used in quest')
     parser.add_argument('--chunk_size', type=int, default=16, help='only used in quest')
 
@@ -23,11 +23,6 @@ if __name__ == '__main__':
     tokenizer, model = get_model_and_tokenizer(**env_conf["model"])
     model.eval()
 
-    if args.enable_quest:
-        from quest.evaluation.quest_attention import enable_quest_attention_eval
-        enable_quest_attention_eval(model.model, args)
-
-
     ckp_file = env_conf['model']['save_ckp']
     if os.path.exists(ckp_file):
         print(f"load checkpoint {ckp_file}")
@@ -37,6 +32,10 @@ if __name__ == '__main__':
 
     if args.rmt:
         evaluator_class = RMTEvaluator
+    elif args.quest:
+        from quest.evaluation.quest_attention import enable_quest_attention_eval
+        enable_quest_attention_eval(model.model, args)
+        evaluator_class = QuestEvaluator
     else:
         evaluator_class = Evaluator
 

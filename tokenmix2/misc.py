@@ -9,7 +9,8 @@ from .data import get_corpus
 from .eval import (
     test_on_task, 
     test_on_task_for_rmt,
-    test_on_task_for_enc)
+    test_on_task_for_enc,
+    test_on_task_for_quest)
 from functools import partial
 
 from torch.utils.data import DataLoader
@@ -66,6 +67,13 @@ class RMTEvaluator(Evaluator):
     def evaluate(self):
         for task in self.tasks:
             result = test_on_task_for_rmt(self.model, self.tokenizer, **task)
+            print(json.dumps(result, indent=4))
+
+
+class QuestEvaluator(Evaluator):
+    def evaluate(self):
+        for task in self.tasks:
+            result = test_on_task_for_quest(self.model, self.tokenizer, **task)
             print(json.dumps(result, indent=4))
 
 
