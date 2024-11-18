@@ -168,6 +168,12 @@ if __name__ == '__main__':
     parser.add_argument("--chat_template", type=str, default=None)
     parser.add_argument("--max_gen", type=int, default=None)
     parser.add_argument('--e', action='store_true', help="Evaluate on LongBench-E")
+
+    # Quest related arguments (http://arxiv.org/abs/2406.10774)
+    parser.add_argument('--quest', action='store_true')
+    parser.add_argument('--token_budget', type=int, default=1024, help='only used for quest')
+    parser.add_argument('--chunk_size', type=int, default=16, help='only used for quest')
+
     args = parser.parse_args()
 
     import json, os
@@ -205,6 +211,10 @@ if __name__ == '__main__':
         os.makedirs("pred_e")
 
     tokenizer, model = load_tokenizer_and_model(env_conf)
+
+    if args.quest:
+        from quest.evaluation.quest_attention import enable_quest_attention_eval
+        enable_quest_attention_eval(model.model, args)
 
     for dataset in datasets:
         if args.e:

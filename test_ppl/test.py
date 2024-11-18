@@ -12,8 +12,8 @@ if __name__ == '__main__':
 
     # Quest related arguments (https://arxiv.org/pdf/2406.10774)
     parser.add_argument('--quest', action='store_true')
-    parser.add_argument('--token_budget', type=int, default=1024, help='only used in quest')
-    parser.add_argument('--chunk_size', type=int, default=16, help='only used in quest')
+    parser.add_argument('--token_budget', type=int, default=1024, help='only used for quest')
+    parser.add_argument('--chunk_size', type=int, default=16, help='only used for quest')
 
     args = parser.parse_args()
 
