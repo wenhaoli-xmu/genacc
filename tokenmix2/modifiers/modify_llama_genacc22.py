@@ -9,7 +9,6 @@ from typing import List, Tuple, Optional
 from dataclasses import dataclass
 from contextlib import contextmanager
 import numpy as np
-from profiler import WallTime
 from lsh_kernel import lsh_attn_dx_u8
 
 
@@ -245,10 +244,8 @@ def self_attn_forward(
             k_hash = get_hash_code(keys, self.rot_mat1, self.rot_mat2, self.relu1)
         else:
             assert k_hash_cache is not None, f"`k_hash_cache` is required in the decoding phase."
-
-            with WallTime.get("get_code"):
-                q_hash = get_hash_code(ques, self.rot_mat1, self.rot_mat2, self.relu1)
-                k_hash = get_hash_code(keys, self.rot_mat1, self.rot_mat2, self.relu1)
+            q_hash = get_hash_code(ques, self.rot_mat1, self.rot_mat2, self.relu1)
+            k_hash = get_hash_code(keys, self.rot_mat1, self.rot_mat2, self.relu1)
 
         if k_hash_cache is not None:
             k_hash = torch.cat([k_hash_cache, k_hash], dim=-2)
@@ -273,8 +270,7 @@ def self_attn_forward(
         assert ques.shape[-2] == 1, f"The number of queries in the decoding phase should always be 1 rather than {ques.shape[-2]}"
 
         # low precision attention based on NXOR similarity
-        with WallTime.get("lsh_attn"):
-            low_precision_attn = lsh_attn_dx_u8(q_hash, k_hash)
+        low_precision_attn = lsh_attn_dx_u8(q_hash, k_hash)
 
         # calculate the number of kv pairs to maintain
         num_kv_pair = low_precision_attn.shape[-1]
@@ -316,22 +312,20 @@ def self_attn_forward(
         #         self.ratios.append(sum(ratios) / len(ratios))
         # ==================================================================================
 
-        with WallTime.get("sparse attn"):
-            attn_output = torch.nn.functional.scaled_dot_product_attention(
-                query=ques,
-                key=keys_subset,
-                value=vals_subset)
+        attn_output = torch.nn.functional.scaled_dot_product_attention(
+            query=ques,
+            key=keys_subset,
+            value=vals_subset)
 
         attn_output = attn_output.transpose(1,2).flatten(2)
         return self.o_proj(attn_output), kv_cache, k_hash_cache
 
     else:
-        with WallTime.get("dense attn" if not is_prefill else ""):
-            attn_output = torch.nn.functional.scaled_dot_product_attention(
-                query=ques,
-                key=keys,
-                value=vals,
-                is_causal=is_prefill)
+        attn_output = torch.nn.functional.scaled_dot_product_attention(
+            query=ques,
+            key=keys,
+            value=vals,
+            is_causal=is_prefill)
         
         attn_output = attn_output.transpose(1,2).flatten(2)
         return self.o_proj(attn_output), kv_cache, k_hash_cache
