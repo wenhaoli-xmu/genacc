@@ -487,7 +487,7 @@ class Decoder(torch.nn.Module):
                 params += [
                     layer.self_attn.rot_mat1,
                     layer.self_attn.rot_mat2,
-                ] if draft_kwargs.get('use_mlp', True) else [
+                ] if self.draft_kwargs.get('use_mlp', True) else [
                     layer.self_attn.rot_mat
                 ]
 
