@@ -8,8 +8,8 @@ deepspeed \
     --max_prepare_workers 4 \
     --prepare_batch_size_per_gpu 1 \
     --backward_per_head \
-    --max_que 4096 \
-    --max_oth 4096 \
-    --max_top 4096 \
+    --max_que 1024 \
+    --max_top 1024 \
+    --max_oth 1024 \
     --beta 3.0 \
     --margin 30
