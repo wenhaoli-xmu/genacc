@@ -8,6 +8,7 @@ from peft import get_peft_model, LoraConfig, TaskType
 from functools import wraps
 
 from typing import List, Tuple, Union
+import json
 
 
 def random_rotation_matrix(dim, dtype, device):
@@ -145,15 +146,15 @@ def layer_forward(
     return hidden_states, kv_cache, draft_attn, true_attn, inputs_record
 
 
-def get_attn_score_using_angle_lsh(query, key, rot_mat, cos, sin, gamma=64, query_index=None):
+def get_attn_score_using_angle_lsh(query, key, hash_fn, cos, sin, gamma=64, query_index=None):
     if query_index is None:
         query, key = check_and_apply_qk_rope(query, key, cos, sin)
     else:
         assert query.shape[-2] == query_index.numel(), f"{query.shape}, {query_index.shape}"
         query, key = check_and_apply_qk_rope_random_query(query, key, cos, sin, query_index)
 
-    q_hash = query @ rot_mat
-    k_hash = key @ rot_mat
+    q_hash = hash_fn(query)
+    k_hash = hash_fn(key)
 
     q_hash *= gamma
     k_hash *= gamma
@@ -234,7 +235,7 @@ def self_attn_forward(
 
     if cond1 and cond2:
         draft_score = get_attn_score_using_angle_lsh(
-            ques, keys, self.rot_mat, cos, sin, self.gamma, query_index)
+            ques, keys, self.hash_fn, cos, sin, self.gamma, query_index)
 
         with torch.no_grad():
             true_score = get_attn_score(query=ques, key=keys, cos=cos, sin=sin, query_index=query_index)
@@ -300,10 +301,6 @@ class Decoder(torch.nn.Module):
             decoder, 
             enable_lora: bool = False,
             lora_kwargs: dict = None,
-            fix_layers: list = [],
-            gamma: int = 64,
-            mlp_random_init: bool = False,
-            num_codes: int = 16,
             draft_kwargs: dict = {"use_draft": False}):
 
         super().__init__()
@@ -312,9 +309,17 @@ class Decoder(torch.nn.Module):
         self.fix_layers = fix_layers
         self.draft_kwargs = draft_kwargs
 
+        fix_layers = draft_kwargs.get('fix_layers', [])
+        gamma = draft_kwargs.get('gamma', 64)
+        mlp_random_init = draft_kwargs.get('mlp_random_init', False) 
+        num_mlp_layers = draft_kwargs.get("num_mlp_layers", 2)
+        mlp_dims = draft_kwargs.get("mlp_dims", "[128,128,128]")
+        mlp_dims = json.loads(mlp_dims)
+
         # 修改各种forward函数
         self.model.forward = types.MethodType(model_forward, self.model)
         self.model.model.forward = types.MethodType(model_model_forward, self.model.model)
+
 
         for layer_idx, layer in enumerate(self.layers):
 
@@ -336,12 +341,26 @@ class Decoder(torch.nn.Module):
                     rot_mats.append(random_rotation_matrix(dim=128, **info))
                 return torch.stack(rot_mats, dim=0).unsqueeze(0)
 
-            get_init_value = lambda: torch.randn((1,32,128,128), **info) * 0.001 if mlp_random_init else get_rot_mat()
+            get_init_value = lambda: torch.randn((1,32,128,128), **info) if mlp_random_init else get_rot_mat()
+            
+            meta = {
+                "device": layer.self_attn.q_proj.weight.data.device,
+                "dtype": layer.self_attn.q_proj.weight.data.dtype,
+            }
 
             if not layer.self_attn.is_fix_layer:
-                layer.self_attn.rot_mat = torch.nn.Parameter(
-                    get_init_value()[..., :num_codes], 
-                    requires_grad=True)
+                module_list = torch.nn.ModuleList()
+                
+                for i in range(num_mlp_layers):
+                    linear = torch.nn.Linear(in_features=mlp_dims[i], out_features=mlp_dims[i+1], bias=True, **meta)
+
+                    if i == num_mlp_layers - 1:
+                        module_list.append(linear)
+                    else:
+                        silu = torch.nn.SiLU()
+                        module_list += [linear, silu]
+                    
+                layer.self_attn.hash_fn = module_list
 
 
     def is_benchmark_mode(self):
@@ -371,7 +390,7 @@ class Decoder(torch.nn.Module):
         layer = self.layers[layer]
         if layer.self_attn.is_fix_layer:
             return []
-        return [layer.self_attn.rot_mat]
+        return [layer.self_attn.rot_mat1, layer.self_attn.rot_mat2]
 
 
     def ft_params(self, layer=None):
@@ -379,7 +398,10 @@ class Decoder(torch.nn.Module):
 
         for layer in self.layers:
             if not layer.self_attn.is_fix_layer:
-                params.append(layer.self_attn.rot_mat)
+                params += [
+                    layer.self_attn.rot_mat1,
+                    layer.self_attn.rot_mat2,
+                ]
 
         return params
 
@@ -459,19 +481,10 @@ class LlamaGenAcc23(Modifier):
         lora_kwargs = self.conf["lora_kwargs"]
         draft_kwargs = self.conf['draft_kwargs']
         
-        fix_layers = self.conf.get('fix_layers', [])
-        gamma = self.conf.get('gamma', 64)
-        mlp_random_init = self.conf.get('mlp_random_init', False) 
-        num_codes = self.conf.get('num_codes', 16)
-        
         decoder = Decoder(
             model, 
             enable_lora=enable_lora,
             lora_kwargs=lora_kwargs,
-            fix_layers=fix_layers,
-            gamma=gamma,
-            mlp_random_init=mlp_random_init,
-            num_codes=num_codes,
             draft_kwargs=draft_kwargs)
 
         decoder = Model(decoder)
