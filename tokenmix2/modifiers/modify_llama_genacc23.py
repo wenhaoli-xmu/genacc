@@ -256,6 +256,42 @@ def self_attn_forward(
     return attn_output, kv_cache, *ret_attn
 
 
+def get_rot_mat(info):
+    rot_mats = []
+    for _ in range(32):
+        rot_mats.append(random_rotation_matrix(dim=128, **info))
+    return torch.stack(rot_mats, dim=0).unsqueeze(0)
+
+
+class BiasedProj(torch.nn.Module):
+    def __init__(self, info, random_init, silu, dropout):
+        super().__init__()
+        get_init_value = lambda: torch.randn((1,32,128,128), **info) * 0.001 if random_init else get_rot_mat(info)
+        self.proj = torch.nn.Parameter(get_init_value(), requires_grad=True)
+        self.bias = torch.nn.Parameter(torch.zeros((1,32,1,128), **info), requires_grad=True)
+        self.drop = torch.nn.Dropout(dropout)
+        self.silu = torch.nn.SiLU() if silu else torch.nn.Identity()
+
+    def forward(self, x):
+        return self.silu(self.drop(x @ self.proj + self.bias)) + x
+
+
+
+class MLPHashingFunction(torch.nn.Module):
+    def __init__(self, info, num_mlp_layers, mlp_random_init, dropout):
+        super().__init__()
+        mlp = torch.nn.ModuleList()
+        for i in range(num_mlp_layers):
+            mlp.append(BiasedProj(info, mlp_random_init, i < num_mlp_layers - 1, dropout))
+        self.mlp = mlp
+        
+
+    def forward(self, x):
+        for module in self.mlp:
+            x = module(x)
+        return x
+
+
 class Decoder(torch.nn.Module):
     def _init_lora(
             self,
@@ -306,7 +342,6 @@ class Decoder(torch.nn.Module):
         super().__init__()
         self.decoder = decoder
         self.enable_lora = False
-        self.fix_layers = fix_layers
         self.draft_kwargs = draft_kwargs
 
         fix_layers = draft_kwargs.get('fix_layers', [])
@@ -315,8 +350,10 @@ class Decoder(torch.nn.Module):
         num_mlp_layers = draft_kwargs.get("num_mlp_layers", 2)
         mlp_dims = draft_kwargs.get("mlp_dims", "[128,128,128]")
         mlp_dims = json.loads(mlp_dims)
+        dropout = draft_kwargs.get("dropout", 0.0)
 
         # 修改各种forward函数
+        self.fix_layers = fix_layers
         self.model.forward = types.MethodType(model_forward, self.model)
         self.model.model.forward = types.MethodType(model_model_forward, self.model.model)
 
@@ -335,32 +372,8 @@ class Decoder(torch.nn.Module):
             layer.forward = types.MethodType(layer_forward, layer)
             layer.self_attn.forward = types.MethodType(self_attn_forward, layer.self_attn)
 
-            def get_rot_mat():
-                rot_mats = []
-                for _ in range(32):
-                    rot_mats.append(random_rotation_matrix(dim=128, **info))
-                return torch.stack(rot_mats, dim=0).unsqueeze(0)
-
-            get_init_value = lambda: torch.randn((1,32,128,128), **info) if mlp_random_init else get_rot_mat()
-            
-            meta = {
-                "device": layer.self_attn.q_proj.weight.data.device,
-                "dtype": layer.self_attn.q_proj.weight.data.dtype,
-            }
-
             if not layer.self_attn.is_fix_layer:
-                module_list = torch.nn.ModuleList()
-                
-                for i in range(num_mlp_layers):
-                    linear = torch.nn.Linear(in_features=mlp_dims[i], out_features=mlp_dims[i+1], bias=True, **meta)
-
-                    if i == num_mlp_layers - 1:
-                        module_list.append(linear)
-                    else:
-                        silu = torch.nn.SiLU()
-                        module_list += [linear, silu]
-                    
-                layer.self_attn.hash_fn = module_list
+                layer.self_attn.hash_fn = MLPHashingFunction(info, num_mlp_layers, mlp_random_init, dropout=dropout)
 
 
     def is_benchmark_mode(self):
@@ -390,7 +403,7 @@ class Decoder(torch.nn.Module):
         layer = self.layers[layer]
         if layer.self_attn.is_fix_layer:
             return []
-        return [layer.self_attn.rot_mat1, layer.self_attn.rot_mat2]
+        return list(layer.self_attn.hash_fn.parameters())
 
 
     def ft_params(self, layer=None):
@@ -398,12 +411,9 @@ class Decoder(torch.nn.Module):
 
         for layer in self.layers:
             if not layer.self_attn.is_fix_layer:
-                params += [
-                    layer.self_attn.rot_mat1,
-                    layer.self_attn.rot_mat2,
-                ]
+                params += layer.self_attn.hash_fn.parameters()
 
-        return params
+        return list(params)
 
 
     def forward(

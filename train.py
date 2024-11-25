@@ -336,7 +336,14 @@ def train(args):
                 # 已经prefetch好的数据
                 inputs_gather, length_gather = future.result()
 
-            print(f"layer: {layer_idx}\tstep: {step}\tloss: {sum(history_loss) / len(history_loss):<.3f}\tdiff: {sum(history_diff) / len(history_diff):<.3f}", flush=True)
+            # 输出训练的过程信息
+            print(f"layer: {layer_idx}\t\
+                    step: {step}\t\
+                    loss: {sum(history_loss) / len(history_loss):<.3f}\t\
+                    diff: {sum(history_diff) / len(history_diff):<.3f}\t\
+                    abs_max: {max([p.abs().max().item() for p in params])}\t\
+                    abs_mean: {sum([p.abs().mean().item() for p in params]) / len(params)}", flush=True)
+
             history_loss = []
             history_diff = []
             
@@ -352,7 +359,7 @@ def train(args):
         dist.barrier()
 
         # 保存训练好的参数
-        torch.save(params, f"train_results/{save_path}/{layer_idx}.pth")
+        torch.save(list(params), f"train_results/{save_path}/{layer_idx}.pth")
         print(f"RANK-{args.local_rank} training done !")
         dist.barrier()
 

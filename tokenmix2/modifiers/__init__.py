@@ -313,6 +313,20 @@ def get_modifier(method: str, model_type):
         from .modify_llama_genacc22 import LlamaGenAcc22
         return None, LlamaGenAcc22
 
+    elif method == 'genacc23':
+        """
+        * genacc23是genacc19的升级版, 使用了多层MLP以及残差链接
+        """
+        from .modify_llama_genacc23 import LlamaGenAcc23
+        return None, LlamaGenAcc23
+    
+    elif method == 'genacc24':
+        """
+        * genacc24是genacc23的评测版本, 用于评测PPL之类的task
+        """
+        from .modify_llama_genacc24 import LlamaGenAcc24
+        return None, LlamaGenAcc24
+
     elif method == 'isorope':
         from .modify_llama_isorope import LlamaIsoRoPE
         return None, LlamaIsoRoPE

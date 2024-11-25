@@ -9,6 +9,7 @@ from peft import get_peft_model, LoraConfig, TaskType
 from typing import List, Tuple, Optional
 from profiler import WallTime
 import tqdm
+import json
 
 
 @torch.no_grad()
@@ -54,11 +55,11 @@ def log_diffs(true_attn, draft_attn, layer_idx):
     print(f"diff: {diff.item():<.3f}")
 
 
-def get_attn_score_using_angle_lsh(query, key, rot_mat, cos, sin):
+def get_attn_score_using_angle_lsh(query, key, hash_fn, cos, sin):
     query, key = check_and_apply_qk_rope(query, key, cos, sin)
 
-    q_inner = query @ rot_mat
-    k_inner = key @ rot_mat
+    q_inner = hash_fn(query)
+    k_inner = hash_fn(key)
 
     q_hash = torch.sign(q_inner)
     k_hash = torch.sign(k_inner)
@@ -279,15 +280,7 @@ def self_attn_forward(
         draft_score = get_attn_score_using_angle_lsh(
             query=ques, 
             key=keys, 
-            rot_mat=self.rot_mat,
-            cos=cos, 
-            sin=sin
-        ) if self.draft_kwargs.get('use_mlp', True) is False else get_attn_score_using_mlp(
-            query=ques, 
-            key=keys, 
-            rot_mat1=self.rot_mat1,
-            rot_mat2=self.rot_mat2, 
-            relu=self.relu1, 
+            hash_fn=self.hash_fn,
             cos=cos, 
             sin=sin)
 
@@ -364,6 +357,42 @@ def self_attn_forward(
     return attn_output, kv_cache, *ret_attn
 
 
+def get_rot_mat(info):
+    rot_mats = []
+    for _ in range(32):
+        rot_mats.append(random_rotation_matrix(dim=128, **info))
+    return torch.stack(rot_mats, dim=0).unsqueeze(0)
+
+
+class BiasedProj(torch.nn.Module):
+    def __init__(self, info, in_features, out_features, silu=False, residue=True):
+        super().__init__()
+        get_init_value = lambda: torch.randn((1,32,in_features,out_features), **info) * 0.001
+        self.proj = torch.nn.Parameter(get_init_value(), requires_grad=True)
+        self.bias = torch.nn.Parameter(torch.zeros((1,32,1,out_features), **info), requires_grad=True)
+        self.silu = torch.nn.SiLU() if silu else torch.nn.Identity()
+        self.resi = residue
+
+    def forward(self, x):
+        dx = self.silu(x @ self.proj + self.bias)
+        return dx + x if self.resi else dx
+
+
+class MLPHashingFunction(torch.nn.Module):
+    def __init__(self, info, num_mlp_layers, mlp_dims, mlp_residue):
+        super().__init__()
+        mlp = torch.nn.ModuleList()
+        for i in range(num_mlp_layers):
+            mlp.append(BiasedProj(info, mlp_dims[i], mlp_dims[i+1], i < num_mlp_layers - 1, mlp_residue))
+        self.mlp = mlp
+        
+
+    def forward(self, x):
+        for module in self.mlp:
+            x = module(x)
+        return x
+
+
 class Decoder(torch.nn.Module):
     def _init_lora(
             self,
@@ -415,6 +444,13 @@ class Decoder(torch.nn.Module):
         super().__init__()
         self.decoder = decoder
         self.enable_lora = False
+        
+        fix_layers = draft_kwargs.get('fix_layers', [])
+        num_mlp_layers = draft_kwargs.get("num_mlp_layers", 2)
+        mlp_dims = draft_kwargs.get("mlp_dims", "[128,128,128]")
+        mlp_dims = json.loads(mlp_dims)
+        mlp_residue = draft_kwargs.get("mlp_residue", True)
+
         self.fix_layers = fix_layers
         self.draft_kwargs = draft_kwargs
 
@@ -435,19 +471,8 @@ class Decoder(torch.nn.Module):
             layer.forward = types.MethodType(layer_forward, layer)
             layer.self_attn.forward = types.MethodType(self_attn_forward, layer.self_attn)
 
-            def get_rot_mat():
-                rot_mats = []
-                for _ in range(32):
-                    rot_mats.append(random_rotation_matrix(dim=128, **info))
-                return torch.stack(rot_mats, dim=0).unsqueeze(0)
-
             if not layer.self_attn.is_fix_layer:
-                if draft_kwargs.get('use_mlp', True):
-                    layer.self_attn.rot_mat1 = torch.nn.Parameter(get_rot_mat(), requires_grad=True)
-                    layer.self_attn.relu1 = torch.nn.SiLU()
-                    layer.self_attn.rot_mat2 = torch.nn.Parameter(get_rot_mat(), requires_grad=True)
-                else:
-                    layer.self_attn.rot_mat = torch.nn.Parameter(get_rot_mat(), requires_grad=True)
+                layer.self_attn.hash_fn = MLPHashingFunction(info, num_mlp_layers, mlp_dims, mlp_residue)
 
 
     def is_benchmark_mode(self):
@@ -477,22 +502,17 @@ class Decoder(torch.nn.Module):
         layer = self.layers[layer]
         if layer.self_attn.is_fix_layer:
             return []
-        return [layer.self_attn.rot_mat1, layer.self_attn.rot_mat2] if self.draft_kwargs.get('use_mlp', True) else [layer.self_attn.rot_mat]
+        return list(layer.self_attn.hash_fn.parameters())
 
 
-    def ft_params(self):
+    def ft_params(self, layer=None):
         params = []
 
         for layer in self.layers:
             if not layer.self_attn.is_fix_layer:
-                params += [
-                    layer.self_attn.rot_mat1,
-                    layer.self_attn.rot_mat2,
-                ] if self.draft_kwargs.get('use_mlp', True) else [
-                    layer.self_attn.rot_mat
-                ]
+                params += layer.self_attn.hash_fn.parameters()
 
-        return params
+        return list(params)
 
 
     def forward(
@@ -558,7 +578,7 @@ class Model(torch.nn.Module):
         return outputs
 
 
-class LlamaGenAcc20(Modifier):
+class LlamaGenAcc24(Modifier):
     def __init__(self, model, save_ckp, load_ckp, config):
         self.get_conf(config)
         assert isinstance(self.conf, dict)
