@@ -2,11 +2,11 @@
     "model": {
         "model_name": "unsloth/llama-3-8b",
         "model_dtype": "fp16",
-        "model_method": "genacc21",
+        "model_method": "genacc24",
         "model_structure": null,
-        "save_ckp": "ckp/genacc19-12.pth",
+        "save_ckp": "ckp/llama3-8b-genacc23.pth",
         "load_ckp": null,
-        "config": "config/maskout90.json",
+        "config": "config/llama3-8b-genacc24.json",
         "device_map": null
     },
 
@@ -21,27 +21,27 @@
             {
                 "data": "data/slimpajama/arxiv.json",
                 "conf": "config/slimpajama-trunc4k.json",
-                "partition": 0.2
+                "partition": 0.1
             },
             {
                 "data": "data/slimpajama/book.json",
                 "conf": "config/slimpajama-trunc4k.json",
-                "partition": 0.2
+                "partition": 0.1
             },
             {
                 "data": "data/slimpajama/github.json",
                 "conf": "config/slimpajama-trunc4k.json",
-                "partition": 0.2
+                "partition": 0.6
             },
             {
                 "data": "data/slimpajama/stackexchange.json",
                 "conf": "config/slimpajama-trunc4k.json",
-                "partition": 0.2
+                "partition": 0.1
             },
             {
                 "data": "data/slimpajama/wiki.json",
                 "conf": "config/slimpajama-trunc4k.json",
-                "partition": 0.2
+                "partition": 0.1
             }
         ],
         "accum_grad": 1,

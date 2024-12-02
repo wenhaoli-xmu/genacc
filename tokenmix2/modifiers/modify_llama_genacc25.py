@@ -12,49 +12,6 @@ import tqdm
 import json
 
 
-@torch.no_grad()
-def log_diffs(true_attn, draft_attn, layer_idx):
-    mask = torch.triu(torch.ones(true_attn.shape[-2:], dtype=torch.bool, device=true_attn.device), diagonal=1)[None, None, :, :]
-    true_attn = torch.masked_fill(true_attn, mask, value=torch.finfo(true_attn.dtype).min)
-    indices = torch.argsort(true_attn, dim=-1, descending=True)
-
-    top_cnt = int(indices.shape[-1] * 0.02)
-    top_indices = indices[..., :top_cnt]
-    oth_indices = indices[..., top_cnt:]
-
-    top_mask = torch.gather(mask.expand_as(true_attn), dim=-1, index=top_indices)[..., :, None]
-    oth_mask = torch.gather(mask.expand_as(true_attn), dim=-1, index=oth_indices)[..., None, :]
-
-    top_draft_attn = torch.gather(draft_attn, dim=-1, index=top_indices)[..., :, None]
-    oth_draft_attn = torch.gather(draft_attn, dim=-1, index=oth_indices)[..., None, :]
-
-    total_diff = 0
-    total_compare = 0
-
-    for top_seg, oth_seg, top_mask_seg, oth_mask_seg in tqdm.tqdm(
-        zip(
-        segment(top_draft_attn, dim=1, n=1),
-        segment(oth_draft_attn, dim=1, n=1),
-        segment(top_mask, dim=1, n=1),
-        segment(oth_mask, dim=1, n=1)),
-        desc=f'layer-{layer_idx}'
-    ):
-
-        residual = (top_seg - oth_seg)
-        residual_mask = (top_mask_seg | oth_mask_seg).expand_as(residual).flatten(-3)
-        logits = residual.flatten(-3)[~residual_mask.bool()]
-
-        diff = torch.count_nonzero(logits < 0)
-        compare = logits.numel()
-
-        total_diff += diff
-        total_compare += compare
-
-    # 算一下排序误差
-    diff = total_diff / total_compare
-    print(f"diff: {diff.item():<.3f}")
-
-
 def get_attn_score_using_angle_lsh(query, key, hash_fn, cos, sin):
     query, key = check_and_apply_qk_rope(query, key, cos, sin)
 
@@ -68,36 +25,6 @@ def get_attn_score_using_angle_lsh(query, key, hash_fn, cos, sin):
     return sim
 
 
-def get_attn_score_using_mlp(query, key, rot_mat1, rot_mat2, relu, cos, sin):
-    query, key = check_and_apply_qk_rope(query, key, cos, sin)
-
-    q_inner = relu(query @ rot_mat1) @ rot_mat2
-    k_inner = relu(key @ rot_mat1) @ rot_mat2
-
-    q_hash = torch.sign(q_inner)
-    k_hash = torch.sign(k_inner)
-
-    sim = q_hash @ k_hash.transpose(-1,-2)
-    return sim
-
-
-def random_rotation_matrix(dim, dtype, device):
-    """
-    随机生成一个 n 维旋转矩阵
-    :param dim: 维度大小 (n)
-    :return: n x n 随机旋转矩阵
-    """
-    # 使用QR分解生成随机正交矩阵
-    random_matrix = torch.randn((dim, dim), dtype=torch.float64)
-    q, r = torch.linalg.qr(random_matrix)
-    
-    # 调整使其行列式为1
-    if torch.det(q) < 0:
-        q[:, 0] *= -1
-
-    return q.type(dtype).to(device)
-
-
 def model_forward(
     self,
     input_ids: torch.LongTensor,
@@ -106,11 +33,11 @@ def model_forward(
     **kwargs
 ):
     # model forward function
-    hidden_states, kv_cache, draft_attn, true_attn = self.model(
+    hidden_states, kv_cache = self.model(
         input_ids=input_ids,
         kv_cache=kv_cache)
     
-    logits = self.lm_head(hidden_states).float()
+    logits = self.lm_head(hidden_states[..., -1:,:]).float()
 
     loss = None
     if labels is not None:
@@ -127,8 +54,7 @@ def model_forward(
     return CausalLMOutputWithPast(
         loss=loss, 
         logits=logits, 
-        past_key_values=kv_cache,
-        attentions=(draft_attn, true_attn))
+        past_key_values=kv_cache)
 
 
 def model_model_forward(
@@ -142,29 +68,23 @@ def model_model_forward(
     if kv_cache is None:
         kv_cache = [None] * len(self.layers)
 
-    draft_attns = []
-    true_attns = []
-
     for layer_idx, (decoder_layer, kv_cache_layer) in enumerate(zip(self.layers, kv_cache)):
         layer_output = decoder_layer(
             hidden_states, 
             kv_cache_layer)
 
-        hidden_states, kv_cache_layer, draft_attn, true_attn = layer_output
-        draft_attns.append(draft_attn)
-        true_attns.append(true_attn)
-
+        hidden_states, kv_cache_layer = layer_output
         kv_cache[layer_idx] = kv_cache_layer
 
     hidden_states = self.norm(hidden_states)
 
-    return hidden_states, kv_cache, draft_attns, true_attns
+    return hidden_states, kv_cache
 
 
 def layer_forward(
     self,
     hidden_states: torch.Tensor,
-    kv_cache: Tuple[torch.Tensor, torch.Tensor] = None,
+    kv_cache: Tuple[torch.Tensor, torch.Tensor] = None
 ):
     device = self.self_attn.q_proj.weight.data.device
     if hidden_states.device != device:
@@ -173,7 +93,8 @@ def layer_forward(
     # do the self attention mechanism
     residual = hidden_states
     hidden_states = self.input_layernorm(hidden_states)
-    hidden_states, kv_cache, draft_attn, true_attn = self.self_attn(
+
+    hidden_states, kv_cache = self.self_attn(
         hidden_states, 
         kv_cache)
     hidden_states = residual + hidden_states
@@ -184,61 +105,7 @@ def layer_forward(
     hidden_states = self.mlp(hidden_states)
     hidden_states = residual + hidden_states
 
-    return hidden_states, kv_cache, draft_attn, true_attn
-
-
-def compute_attn_supervise_loss(draft_attn, true_attn, max_top, max_oth, maskout):
-    loss = torch.tensor(0, dtype=torch.float32)
-    diff = 0
-    total = 0
-    criterion = torch.nn.BCEWithLogitsLoss()
-        
-    # 计算出true attn的sort index
-    mask = torch.triu(torch.ones(true_attn.shape[-2:], dtype=torch.bool, device=true_attn.device), diagonal=1)[None, None, :, :]
-    true_attn = torch.masked_fill(true_attn, mask, value=torch.finfo(true_attn.dtype).min)
-    indices = torch.argsort(true_attn, dim=-1, descending=True)
-
-    # 切分出来top 0.01 的indices，和other 0.98的indices
-    top_cnt = int(indices.shape[-1] * (1 - maskout))
-    top_indices = indices[..., :top_cnt]
-    oth_indices = indices[..., top_cnt:]
-
-    if max_top is not None:
-        top_rnd_indices = torch.randperm(top_cnt, dtype=torch.int64, device=indices.device)[:max_top]
-        top_indices = top_indices[..., top_rnd_indices]
-    if max_oth is not None:
-        oth_rnd_indices = torch.randperm(indices.shape[-1] - top_cnt, dtype=torch.int64, device=indices.device)[:max_oth]
-        oth_indices = oth_indices[..., oth_rnd_indices]
-
-    top_mask = torch.gather(mask.expand_as(true_attn), dim=-1, index=top_indices)[..., :, None]
-    oth_mask = torch.gather(mask.expand_as(true_attn), dim=-1, index=oth_indices)[..., None, :]
-
-    top_draft_attn = torch.gather(draft_attn, dim=-1, index=top_indices)[..., :, None]
-    oth_draft_attn = torch.gather(draft_attn, dim=-1, index=oth_indices)[..., None, :]
-
-    num_heads = top_draft_attn.shape[1]
-
-    for top_head, oth_head, top_mask_head, oth_mask_head in zip(
-        segment(top_draft_attn, dim=1, n=1),
-        segment(oth_draft_attn, dim=1, n=1),
-        segment(top_mask, dim=1, n=1),
-        segment(oth_mask, dim=1, n=1)
-    ):
-
-        residual = top_head - oth_head
-        residual_mask = (top_mask_head | oth_mask_head).expand_as(residual).flatten(-3)
-
-        logits = residual.flatten(-3)[~residual_mask.bool()]
-        labels = torch.ones_like(logits, dtype=torch.float32)
-        loss += criterion(logits, labels.type(torch.float32)).cpu()
-        
-        diff += torch.count_nonzero(logits < 0).item()
-        total += logits.numel()
-
-    diff /= total
-    loss /= num_heads
-
-    return diff, loss
+    return hidden_states, kv_cache
 
 
 def self_attn_forward(
@@ -269,27 +136,22 @@ def self_attn_forward(
         vals = torch.cat([val_cache, vals], dim=-2)
 
     kv_cache = (keys.data, vals.data)
-    ret_attn = (None, None)
 
     cos, sin = self.rotary_emb(vals, seq_len=8192)
     cond1 = self.draft_kwargs['enable'] is True
     cond2 = not self.is_fix_layer
+    cond3 = not is_prefill  # pre-filling阶段不使用draft attention
 
-    if cond1 and cond2:
+    if cond1 and cond2 and cond3:
 
         draft_score = get_attn_score_using_angle_lsh(
             query=ques, 
             key=keys, 
-            hash_fn=self.hash_fn,
+            hash_fn=self.hash_fn, 
             cos=cos, 
             sin=sin)
 
-        # pre-filling stage should do causal attention
-        if is_prefill:
-            mask = generate_mask(*draft_score.shape[-2:], dtype=draft_score.dtype, device=draft_score.device)
-            draft_score += mask
-
-        # 2. compute the topk indices
+        # 1. compute the topk indices
         def aggregate_topk(x, k):
             assert isinstance(x, torch.Tensor) and x.ndim == 4
             _, x_topk = x.topk(k=k, dim=-1)
@@ -300,7 +162,6 @@ def self_attn_forward(
         num_remain = max(min(num_kv_pair, self.draft_kwargs['min_remain']), num_remain)
         draft_indices = aggregate_topk(draft_score, num_remain)
 
-
         # =========================================================================================================
         # NOTE: test
         # diff, loss = compute_attn_supervise_loss(draft_score, true_score, max_top=None, max_oth=1024, maskout=0.98)
@@ -308,23 +169,29 @@ def self_attn_forward(
         # =========================================================================================================
 
 
-        # =========================================================================================================
+        # ==================================================================================
         # NOTE: test
-        if self.draft_kwargs['bench_mark']:
-            # 2.5 run benchmark to evaluate the performance of draft strategy
-            true_score = get_attn_score(query=ques, key=keys, cos=cos, sin=sin)
-            true_indices = aggregate_topk(true_score, num_remain)
-            self.ratios = []
+        # if self.draft_kwargs['bench_mark']:
 
-            for draft_head, true_head in zip(draft_indices[0,:,-1,:], true_indices[0,:,-1,:]):
-                draft_set = set(draft_head.tolist())
-                true_set = set(true_head.tolist())
+        #     # 2.5 run benchmark to evaluate the performance of draft strategy
+        #     true_score = get_attn_score(query=ques, key=keys, cos=cos, sin=sin)
+        #     true_indices = aggregate_topk(true_score, num_remain)
+        #     self.ratios = []
 
-                intersect = draft_set.intersection(true_set)
-                union = draft_set.union(true_set)
-                ratio = len(intersect) / len(union)
-                self.ratios.append(ratio)
-        # =========================================================================================================
+        #     for draft_head, true_head in zip(draft_indices[0], true_indices[0]):
+        #         ratios = []
+
+        #         for qid, (draft_query, true_query) in enumerate(zip(draft_head, true_head)):
+        #             draft_set = set(draft_query[:qid + 1].tolist())
+        #             true_set = set(true_query[:qid + 1].tolist())
+
+        #             intersect = draft_set.intersection(true_set)
+        #             union = draft_set.union(true_set)
+        #             ratio = len(intersect) / len(union)
+        #             ratios.append(ratio)
+                
+        #         self.ratios.append(sum(ratios) / len(ratios))
+        # ==================================================================================
 
 
         # 3. discard the unimportant token while keep the important 
@@ -354,14 +221,7 @@ def self_attn_forward(
             sin=sin,
             out_proj=self.o_proj)
 
-    return attn_output, kv_cache, *ret_attn
-
-
-def get_rot_mat(info):
-    rot_mats = []
-    for _ in range(32):
-        rot_mats.append(random_rotation_matrix(dim=128, **info))
-    return torch.stack(rot_mats, dim=0).unsqueeze(0)
+    return attn_output, kv_cache
 
 
 class MLPLayer(torch.nn.Module):
@@ -444,12 +304,12 @@ class Decoder(torch.nn.Module):
         super().__init__()
         self.decoder = decoder
         self.enable_lora = False
-        
+
         fix_layers = draft_kwargs.get('fix_layers', [])
-        num_mlp_layers = draft_kwargs.get("num_mlp_layers", 2)
-        mlp_dims = draft_kwargs.get("mlp_dims", "[128,128,128]")
+        num_mlp_layers = draft_kwargs.get('num_mlp_layers', 2)
+        mlp_dims = draft_kwargs.get('mlp_dims', '[128,128,128]')
         mlp_dims = json.loads(mlp_dims)
-        mlp_residue = draft_kwargs.get("mlp_residue", True)
+        mlp_residue = draft_kwargs.get('mlp_residue', True)
 
         self.fix_layers = fix_layers
         self.draft_kwargs = draft_kwargs
@@ -518,12 +378,14 @@ class Decoder(torch.nn.Module):
     def forward(
             self, 
             input_ids, 
-            labels=None):
+            labels=None,
+            kv_cache=None):
 
         # decoder forward
         outputs = self.decoder(
             input_ids=input_ids, 
-            labels=labels)
+            labels=labels,
+            kv_cache=kv_cache)
 
         return outputs
 
@@ -548,6 +410,7 @@ class Model(torch.nn.Module):
     def forward(
             self,
             input_ids,
+            kv_cache=None,
             labels=None,
             local_rank=None,
             **kwargs
@@ -573,12 +436,13 @@ class Model(torch.nn.Module):
 
         outputs = self.decoder(
             input_ids, 
-            labels=labels)
+            labels=labels,
+            kv_cache=kv_cache)
 
         return outputs
 
 
-class LlamaGenAcc24(Modifier):
+class LlamaGenAcc25(Modifier):
     def __init__(self, model, save_ckp, load_ckp, config):
         self.get_conf(config)
         assert isinstance(self.conf, dict)
@@ -631,14 +495,18 @@ class LlamaGenAcc24(Modifier):
         input_ids = input_ids.to(device)
 
         # prefilling
-        prefill_ids = input_ids[:, :-1]
-        self.model(input_ids=prefill_ids)
+        output = self.model(input_ids=input_ids)
+        logits, kv_cache = output.logits, output.past_key_values
+        new_tok = logits.argmax(dim=-1)
+        new_ids = [new_tok]
 
         # generation
         new_tok = input_ids[:, -1:]
         new_ids = []
         while len(new_ids) < max_new_tokens:
-            logits = self.model(input_ids=new_tok).logits
+            output = self.model(input_ids=new_tok, kv_cache=kv_cache)
+            logits, kv_cache = output.logits, output.past_key_values
+
             new_tok = logits.argmax(dim=-1)
             if new_tok.ravel().item() in eos_token_id: break
             new_ids.append(new_tok.ravel().item())

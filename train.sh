@@ -1,5 +1,5 @@
 deepspeed \
-    --include localhost:4,5,6,7 \
+    --include localhost:0,1,2,3 \
     train.py \
     --num_layers 32 \
     --max_tokens 8192 \

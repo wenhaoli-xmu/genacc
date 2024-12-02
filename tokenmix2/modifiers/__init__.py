@@ -327,6 +327,13 @@ def get_modifier(method: str, model_type):
         from .modify_llama_genacc24 import LlamaGenAcc24
         return None, LlamaGenAcc24
 
+    elif method == 'genacc25':
+        """
+        * genacc25是genacc23的评测版本, 用于评测generation类型的任务, 比如longbench
+        """
+        from .modify_llama_genacc25 import LlamaGenAcc25
+        return None, LlamaGenAcc25
+
     elif method == 'isorope':
         from .modify_llama_isorope import LlamaIsoRoPE
         return None, LlamaIsoRoPE

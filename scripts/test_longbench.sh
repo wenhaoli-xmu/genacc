@@ -1,10 +1,7 @@
-test_scripts=(
-    "llama2-7b-chat.json"
-    "llama2-7b-chat-maskout98.json"
-    "llama2-7b-chat-maskout90.json")
+test_scripts=("llama3-8b-genacc23.json")
 
-chat_template="llama-2"
-model_max_length=4096
+chat_tempalte='llama-3'
+model_max_length=8192
 
 for test_script in "${test_scripts[@]}"
 do
