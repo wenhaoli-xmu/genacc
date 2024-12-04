@@ -1,14 +1,11 @@
 import torch
 import types
-from .modify_llama import do_sdpa_attn, do_draft_attn_via_down_proj, generate_mask, get_attn_score, check_and_apply_qk_rope, segment
+from .modify_llama import do_sdpa_attn, check_and_apply_qk_rope
 from transformers.models.llama.modeling_llama import CausalLMOutputWithPast, repeat_kv, CrossEntropyLoss
-from torch.utils.checkpoint import checkpoint
 from ..modifier import Modifier
 from peft import get_peft_model, LoraConfig, TaskType
 
-from typing import List, Tuple, Optional
-from profiler import WallTime
-import tqdm
+from typing import List, Tuple
 import json
 
 

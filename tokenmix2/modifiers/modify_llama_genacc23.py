@@ -263,7 +263,7 @@ def get_rot_mat(info):
     return torch.stack(rot_mats, dim=0).unsqueeze(0)
 
 
-class BiasedProj(torch.nn.Module):
+class MLPLayer(torch.nn.Module):
     def __init__(self, info, random_init, silu, dropout):
         super().__init__()
         get_init_value = lambda: torch.randn((1,32,128,128), **info) * 0.001 if random_init else get_rot_mat(info)
@@ -282,7 +282,7 @@ class MLPHashingFunction(torch.nn.Module):
         super().__init__()
         mlp = torch.nn.ModuleList()
         for i in range(num_mlp_layers):
-            mlp.append(BiasedProj(info, mlp_random_init, i < num_mlp_layers - 1, dropout))
+            mlp.append(MLPLayer(info, mlp_random_init, i < num_mlp_layers - 1, dropout))
         self.mlp = mlp
         
 

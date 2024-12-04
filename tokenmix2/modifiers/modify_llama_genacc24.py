@@ -1,13 +1,12 @@
 import torch
 import types
-from .modify_llama import do_sdpa_attn, do_draft_attn_via_down_proj, generate_mask, get_attn_score, check_and_apply_qk_rope, segment
+from .modify_llama import do_sdpa_attn, generate_mask, get_attn_score, check_and_apply_qk_rope, segment
 from transformers.models.llama.modeling_llama import CausalLMOutputWithPast, repeat_kv, CrossEntropyLoss
 from torch.utils.checkpoint import checkpoint
 from ..modifier import Modifier
 from peft import get_peft_model, LoraConfig, TaskType
 
-from typing import List, Tuple, Optional
-from profiler import WallTime
+from typing import List, Tuple
 import tqdm
 import json
 
@@ -68,19 +67,6 @@ def get_attn_score_using_angle_lsh(query, key, hash_fn, cos, sin):
     return sim
 
 
-def get_attn_score_using_mlp(query, key, rot_mat1, rot_mat2, relu, cos, sin):
-    query, key = check_and_apply_qk_rope(query, key, cos, sin)
-
-    q_inner = relu(query @ rot_mat1) @ rot_mat2
-    k_inner = relu(key @ rot_mat1) @ rot_mat2
-
-    q_hash = torch.sign(q_inner)
-    k_hash = torch.sign(k_inner)
-
-    sim = q_hash @ k_hash.transpose(-1,-2)
-    return sim
-
-
 def random_rotation_matrix(dim, dtype, device):
     """
     随机生成一个 n 维旋转矩阵
@@ -110,7 +96,7 @@ def model_forward(
         input_ids=input_ids,
         kv_cache=kv_cache)
     
-    logits = self.lm_head(hidden_states).float()
+    logits = self.lm_head(hidden_states).cpu().float()
 
     loss = None
     if labels is not None:
@@ -365,25 +351,34 @@ def get_rot_mat(info):
 
 
 class MLPLayer(torch.nn.Module):
-    def __init__(self, info, in_features, out_features, silu=False, residue=True):
+    def __init__(self, info, random_init, silu, dropout):
         super().__init__()
-        get_init_value = lambda: torch.randn((1,32,in_features,out_features), **info) * 0.001
+        get_init_value = lambda: torch.randn((1,32,128,128), **info) * 0.001 if random_init else get_rot_mat(info)
         self.proj = torch.nn.Parameter(get_init_value(), requires_grad=True)
-        self.bias = torch.nn.Parameter(torch.zeros((1,32,1,out_features), **info), requires_grad=True)
+        self.bias = torch.nn.Parameter(torch.zeros((1,32,1,128), **info), requires_grad=True)
+        self.drop = torch.nn.Dropout(dropout)
         self.silu = torch.nn.SiLU() if silu else torch.nn.Identity()
-        self.resi = residue
 
     def forward(self, x):
-        dx = self.silu(x @ self.proj + self.bias)
-        return dx + x if self.resi else dx
+        return self.silu(self.drop(x @ self.proj + self.bias)) + x
+    
+
+class LinearHashingFunction(torch.nn.Module):
+    def __init__(self, info, *args, **kwargs):
+        super().__init__()
+        linear = torch.nn.Parameter(get_rot_mat(info))
+        self.linear = linear
+
+    def forward(self ,x):
+        return x @ self.linear
 
 
 class MLPHashingFunction(torch.nn.Module):
-    def __init__(self, info, num_mlp_layers, mlp_dims, mlp_residue):
+    def __init__(self, info, num_mlp_layers, mlp_random_init, dropout):
         super().__init__()
         mlp = torch.nn.ModuleList()
         for i in range(num_mlp_layers):
-            mlp.append(MLPLayer(info, mlp_dims[i], mlp_dims[i+1], i < num_mlp_layers - 1, mlp_residue))
+            mlp.append(MLPLayer(info, mlp_random_init, i < num_mlp_layers - 1, dropout))
         self.mlp = mlp
         
 
@@ -449,7 +444,8 @@ class Decoder(torch.nn.Module):
         num_mlp_layers = draft_kwargs.get("num_mlp_layers", 2)
         mlp_dims = draft_kwargs.get("mlp_dims", "[128,128,128]")
         mlp_dims = json.loads(mlp_dims)
-        mlp_residue = draft_kwargs.get("mlp_residue", True)
+        mlp_random_init = draft_kwargs.get("mlp_random_init", False)
+        dropout = draft_kwargs.get("dropout", 0.0)
 
         self.fix_layers = fix_layers
         self.draft_kwargs = draft_kwargs
@@ -472,7 +468,7 @@ class Decoder(torch.nn.Module):
             layer.self_attn.forward = types.MethodType(self_attn_forward, layer.self_attn)
 
             if not layer.self_attn.is_fix_layer:
-                layer.self_attn.hash_fn = MLPHashingFunction(info, num_mlp_layers, mlp_dims, mlp_residue)
+                layer.self_attn.hash_fn = MLPHashingFunction(info, num_mlp_layers, mlp_random_init, dropout)
 
 
     def is_benchmark_mode(self):

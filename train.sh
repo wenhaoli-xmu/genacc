@@ -4,7 +4,7 @@ deepspeed \
     --num_layers 32 \
     --max_tokens 8192 \
     --env_conf train/llama3-8b-genacc23.json \
-    --instance_per_cycle 512 \
+    --instance_per_cycle 1024 \
     --max_prepare_workers 4 \
     --prepare_batch_size_per_gpu 1 \
     --backward_per_head \
