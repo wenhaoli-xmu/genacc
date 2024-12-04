@@ -10,8 +10,7 @@ from .eval import (
     test_on_task, 
     test_on_task_for_rmt,
     test_on_task_for_enc,
-    test_on_task_for_quest,
-    test_on_task_for_magicpig)
+    test_on_task_for_quest)
 from functools import partial
 
 from torch.utils.data import DataLoader
