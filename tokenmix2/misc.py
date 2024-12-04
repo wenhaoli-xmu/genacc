@@ -10,11 +10,13 @@ from .eval import (
     test_on_task, 
     test_on_task_for_rmt,
     test_on_task_for_enc,
-    test_on_task_for_quest)
+    test_on_task_for_quest,
+    test_on_task_for_magicpig)
 from functools import partial
 
 from torch.utils.data import DataLoader
 import json
+
 
 
 class Saver:
@@ -182,6 +184,44 @@ def get_env_conf(env_conf: str):
     with open(env_conf, 'r') as f:
         env_conf = json.load(f)
     return env_conf
+
+
+def get_tokenizer(
+        model_name, 
+        **kwargs
+):
+    if "tokenizer_name" in kwargs:
+        tokenizer = AutoTokenizer.from_pretrained(
+            kwargs.get('tokenizer_name'), 
+            use_fast=True)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_name, 
+            use_fast=True)
+
+    return tokenizer
+
+
+def get_magicpig(
+        model_name,
+        max_new_tokens,
+        **kwargs
+):
+    from .magicpig.model_wrappers import HuggingFaceModel
+    torch.backends.cudnn.deterministic = True
+    llm = HuggingFaceModel(
+        name_or_path=model_name,
+        top_k=32,
+        top_p=1.0,
+        K=9,
+        L=200,
+        W=32,
+        S=0.05,
+        Q=0,
+        QR=0.05,
+        max_new_tokens=max_new_tokens,
+        stop='')
+    return llm
 
 
 def get_model_and_tokenizer(

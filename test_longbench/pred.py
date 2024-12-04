@@ -6,7 +6,7 @@ from tqdm import tqdm
 import numpy as np
 import random
 import argparse
-from tokenmix2.misc import get_model_and_tokenizer
+from tokenmix2.misc import get_model_and_tokenizer, get_tokenizer, get_torch_dtype
 
 from corpus.processor.conversations import get_conv_template
 
@@ -76,7 +76,8 @@ def get_pred(
         model_name, 
         out_path, 
         model_max_length,
-        chat_template):
+        chat_template,
+        magicpig: bool = False):
 
     
     for json_obj in tqdm(data):
@@ -84,14 +85,16 @@ def get_pred(
         prompt = prompt_format.format(**json_obj)
         # truncate to fit max_length (we suggest truncate in the middle, since the left and right side may contain crucial instructions)
         
-        # modified: 注释掉
+        # =====================================================================================================================================================
+        # NOTE: 注释掉
         # tokenized_prompt = tokenizer(prompt, truncation=False, return_tensors="pt").input_ids[0]
         # if "chatglm3" in model_name:
         #     tokenized_prompt = tokenizer(prompt, truncation=False, return_tensors="pt", add_special_tokens=False).input_ids[0]
         # if len(tokenized_prompt) > max_length:
         #     half = int(max_length/2)
         #     prompt = tokenizer.decode(tokenized_prompt[:half], skip_special_tokens=True)+tokenizer.decode(tokenized_prompt[-half:], skip_special_tokens=True)
-        
+        # =====================================================================================================================================================
+
         if dataset not in ["trec", "triviaqa", "samsum", "lsht", "lcc", "repobench-p"]: # chat models are better off without build prompts on these tasks
             prompt = build_chat(tokenizer, prompt, model_name, chat_template)
 
@@ -120,19 +123,17 @@ def get_pred(
         context_length = input.input_ids.shape[-1]
         # ======================================================
 
-    
-        # ============================
+
+        # ======================================================
         # NOTE: 新增加
-        if max_gen == 0 and hasattr(model, 'prefill'):
-            kv_caches = model.prefill(input_ids=input.input_ids)
-            del kv_caches
-            output = input.input_ids
+        if magicpig:
+            output = model.predict(input_ids=input.input_ids)
         else:
             output = model.generate(
                 input_ids=input.input_ids,
                 max_new_tokens=max_gen
             ).ravel().tolist()
-        # ============================
+        # ======================================================
 
 
         # ==============================================
@@ -161,6 +162,7 @@ def seed_everything(seed):
     torch.backends.cudnn.deterministic = True
     torch.cuda.manual_seed_all(seed)
 
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--env_conf", type=str, default=None)
@@ -174,7 +176,19 @@ if __name__ == '__main__':
     parser.add_argument('--token_budget', type=int, default=1024, help='only used for quest')
     parser.add_argument('--chunk_size', type=int, default=16, help='only used for quest')
 
+    # MagicPIG related arguments (https://arxiv.org/abs/2410.16179)
+    parser.add_argument('--magicpig', action='store_true')
+    parser.add_argument('--device_budget', type=int, default=68)
     args = parser.parse_args()
+
+    # model max length auto inference
+    if args.model_max_length == 0:
+        if 'llama2' in args.env_conf:
+            args.model_max_length = 4096
+        elif 'llama3' in args.env_conf:
+            args.model_max_length = 8192
+        else:
+            raise NotImplementedError
 
     import json, os
     with open(args.env_conf, "r") as f:
@@ -210,11 +224,16 @@ if __name__ == '__main__':
     if not os.path.exists("pred_e"):
         os.makedirs("pred_e")
 
-    tokenizer, model = load_tokenizer_and_model(env_conf)
-
-    if args.quest:
-        from quest.evaluation.quest_attention import enable_quest_attention_eval
-        enable_quest_attention_eval(model.model, args)
+    # load model
+    if args.magicpig:
+        from tokenmix2.misc import get_magicpig
+        tokenizer = get_tokenizer(env_conf['model']['model_name'])
+        model = get_magicpig(env_conf['model']['model_name'], args.max_gen)
+    else:
+        tokenizer, model = load_tokenizer_and_model(env_conf)
+        if args.quest:
+            from quest.evaluation.quest_attention import enable_quest_attention_eval
+            enable_quest_attention_eval(model.model, args)
 
     for dataset in datasets:
         if args.e:
@@ -243,4 +262,5 @@ if __name__ == '__main__':
             model_name, 
             out_path, 
             args.model_max_length, 
-            args.chat_template)
+            args.chat_template,
+            args.magicpig)
