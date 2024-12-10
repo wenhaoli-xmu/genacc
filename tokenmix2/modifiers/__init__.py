@@ -16,6 +16,14 @@ def get_modifier(method: str, model_type: str):
         from .spotlight_generation import Spotlight
         return None, Spotlight
     
+    elif method == 'genacc19-evaluation':
+        from .genacc19_evaluation import Genacc19
+        return None, Genacc19
+    
+    elif method == 'genacc19-generation':
+        from .genacc19_generation import Genacc19
+        return None, Genacc19
+    
     elif method == 'linearhashing-evaluation':
         from .linearhashing_evaluation import LinearHashing
         return None, LinearHashing
