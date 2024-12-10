@@ -1,6 +1,4 @@
-test_scripts=(
-    "llama3-8b-maskout98.json"
-    "llama3-8b-maskout90.json")
+test_scripts=("llama3-8b-spotlight.json")
 
 for test_script in "${test_scripts[@]}"
 do

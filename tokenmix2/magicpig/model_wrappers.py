@@ -17,7 +17,7 @@ import logging
 import requests
 import torch
 from typing import Dict, List, Optional
-CHUNK_SIZE = 8192
+CHUNK_SIZE = 1024
 
 class HuggingFaceModel:
     def __init__(self, name_or_path: str, K, L, S, W, Q, QR, approx=False, **generation_kwargs) -> None:
@@ -59,7 +59,7 @@ class HuggingFaceModel:
         self.sparse = []
 
 
-    def predict(self, input_ids: torch.Tensor):
+    def generate(self, input_ids: torch.Tensor):
         seq_len = input_ids.shape[1]
         num_chunk = (seq_len // CHUNK_SIZE - 2) if (seq_len % CHUNK_SIZE == 0) else (seq_len // CHUNK_SIZE - 1)
         past_key_values = None
@@ -67,9 +67,10 @@ class HuggingFaceModel:
             self.model.select_kv(False)
         with torch.inference_mode():
             for chunk_id in range(num_chunk):
-                outputs = self.model(input_ids=input_ids[:,chunk_id * CHUNK_SIZE : (chunk_id + 1) * CHUNK_SIZE],
-                                    past_key_values=past_key_values,
-                                    use_cache=True)
+                outputs = self.model(
+                    input_ids=input_ids[:,chunk_id * CHUNK_SIZE : (chunk_id + 1) * CHUNK_SIZE],
+                    past_key_values=past_key_values,
+                    use_cache=True)
                 past_key_values = outputs.past_key_values
         if self.approx:
             self.model.select_kv(True)
@@ -91,12 +92,12 @@ class HuggingFaceModel:
             self.sparse.append(sparse)
             self.decode_tokens.append(cache.decode_tokens)
             output = output.sequences
+
         if self.approx:
             self.model.select_kv(False)
 
         torch.cuda.empty_cache()
         return output[0]
-        
 
 
     def __call__(self, prompt: str, **kwargs) -> Dict[str, List[str]]:

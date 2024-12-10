@@ -212,6 +212,8 @@ def test_on_task(model, tokenizer, task_type, task_name, num_instance, truncatio
             assert callable(callback)
             callback(outputs)
 
+        torch.cuda.empty_cache()
+
     accum_total_output = post_process(accum_total_output, task_type)
 
     result = {

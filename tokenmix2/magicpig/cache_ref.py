@@ -4,8 +4,6 @@ import torch
 import math
 from transformers.models.llama.modeling_llama import repeat_kv
 import torch.nn.functional as F
-
-
 class SimCache(Cache):
     """
     A cache that grows dynamically as more tokens are generated. This is the default for generative models.
@@ -46,6 +44,7 @@ class SimCache(Cache):
         self.device = device
         self.dtype = dtype
         self.hash_matrix = [torch.randn((1, self.num_kh, self.head_dim, self.K * self.L), device=self.device, dtype=self.dtype) for _ in range((self.num_layers-1) //  16 + 1)]
+        
         self.select_head = [[] for _ in range(self.num_layers)]
         self.sparse = 0.0
         self.decode_tokens = 0
@@ -117,7 +116,6 @@ class SimCache(Cache):
             
             self.key_cache[layer_idx] = torch.cat([self.key_cache[layer_idx], key_states], dim=-2)
             self.value_cache[layer_idx] = torch.cat([self.value_cache[layer_idx], value_states], dim=-2)
-
             key_states = key_states - self.avg_key[layer_idx]
             self.selected_key_cache[layer_idx] = torch.cat([self.selected_key_cache[layer_idx], key_states], dim=-2)
             self.selected_value_cache[layer_idx] = torch.cat([self.selected_value_cache[layer_idx], value_states], dim=-2)
@@ -139,9 +137,14 @@ class SimCache(Cache):
                     self.sparse  += mask.float().mean().item()
                     
                     unselected_key_cache = repeat_kv(self.unselected_key_cache[layer_idx], self.num_qh // self.num_kh)
+                    
+                    
                     selected_key_cache = repeat_kv(self.selected_key_cache[layer_idx], self.num_qh // self.num_kh)
                     
+                    
+                    
                     attn_unselected = torch.matmul(query_states, unselected_key_cache.transpose(2,3))
+                    
                     attn_unselected = attn_unselected.to(torch.float32)
                     attn_selected = torch.matmul(query_states, selected_key_cache.transpose(2,3)) / math.sqrt(self.head_dim)
                     attn_selected = attn_selected.to(torch.float32)
@@ -153,6 +156,8 @@ class SimCache(Cache):
                     
                     weight = 1 - theta / torch.pi
                     weight = 1 - (1 - weight**self.K)**self.L - self.L * ((1 - weight**self.K)**(self.L - 1)) * (weight**self.K)
+                    
+                    
                     
                     attn_unselected = attn_unselected / math.sqrt(self.head_dim)
                     attn_unselected = attn_unselected - torch.log(weight + 1e-4)

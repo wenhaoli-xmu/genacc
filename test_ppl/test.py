@@ -23,13 +23,6 @@ if __name__ == '__main__':
     tokenizer, model = get_model_and_tokenizer(**env_conf["model"])
     model.eval()
 
-    ckp_file = env_conf['model']['save_ckp']
-    if os.path.exists(ckp_file):
-        print(f"load checkpoint {ckp_file}")
-        model.load_checkpoint(ckp_file)
-    else:
-        print(f"{ckp_file} dose not exists")
-
     if args.rmt:
         evaluator_class = RMTEvaluator
     elif args.quest:

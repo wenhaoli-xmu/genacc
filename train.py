@@ -110,6 +110,8 @@ def collate_fn(batch, pad_token_id, max_tokens):
     input_ids = [x.get('input_ids') for x in batch]
     input_len = [len(x) for x in input_ids]
 
+    assert all([length <= max_tokens for length in input_len]), f"Input length exceed `max_tokens`, please enlarge `max_tokens` or shrink truncation length to fix the problem."
+
     # padding
     input_ids = [x + [pad_token_id] * (max_tokens - len(x)) for x in input_ids]
 
@@ -120,11 +122,12 @@ def collate_fn(batch, pad_token_id, max_tokens):
     return {"input_ids": input_ids, "input_len": input_len}
 
 
-def reset_buffer_dir():
-    if dist.get_rank() == 0:
-        for file in os.listdir("buffer"):
-            os.remove(os.path.join("buffer", file))
-    dist.barrier()
+def reset_buffer_dir(disable):
+    if not disable:
+        if dist.get_rank() == 0:
+            for file in os.listdir("buffer"):
+                os.remove(os.path.join("buffer", file))
+        dist.barrier()
 
 
 def train(args):
@@ -136,7 +139,7 @@ def train(args):
     if not os.path.exists("buffer"):
         os.mkdir("buffer")
     else:
-        reset_buffer_dir()
+        reset_buffer_dir(disable=args.use_prepared_data)
 
     assert env_conf['train']['train_iters'] % args.instance_per_cycle == 0
     assert args.num_layers % num_gpus == 0
@@ -146,48 +149,48 @@ def train(args):
 
     num_inn_cycle = env_conf['train']['train_iters'] // args.instance_per_cycle
     num_out_cycle = args.num_layers // num_gpus
+    executor = ThreadPoolExecutor(max_workers=args.max_prepare_workers)
 
     # 开始训练pipeline
     for out_cycle_idx in range(num_out_cycle):
         torch.manual_seed(42)
 
-        for gpu_id in range(num_gpus):
-            if args.local_rank == gpu_id:
-                # 加载模型 & tokenizer
-                layer_idx = out_cycle_idx * num_gpus + args.local_rank
-                layer_indices = [out_cycle_idx * num_gpus + i for i in range(num_gpus)]
-                env_conf["model"]["device_map"] = {"": args.local_rank}
-                tokenizer, model = get_model_and_tokenizer(**env_conf['model'])
+        # 加载模型 & tokenizer
+        layer_idx = out_cycle_idx * num_gpus + args.local_rank
+        layer_indices = [out_cycle_idx * num_gpus + i for i in range(num_gpus)]
+        env_conf["model"]["device_map"] = {"": args.local_rank}
+        tokenizer, model = get_model_and_tokenizer(**env_conf['model'])
 
-                # 将模型只保存某个layer
-                model.train()
-                model.freeze_model()
-                model.unfreeze_model()
-                layer = model.dump_as_attn_modules()[layer_idx]
-                params = model.layer_ft_params(layer_idx)
-                del model
-                clear_cache(args.local_rank)
-                print(f"RANK-{args.local_rank} training started !")
-            dist.barrier()
+        # 将模型只保存某个layer
+        model.train()
+        model.freeze_model()
+        model.unfreeze_model()
+        layer = model.dump_as_attn_modules()[layer_idx]
+        params = model.layer_ft_params(layer_idx)
+        del model
+        clear_cache(args.local_rank)
+        print(f"RANK-{args.local_rank} training started !")
+        dist.barrier()
 
         # 构造数据集
-        corpus = build_dataset(env_conf, tokenizer)
-        partial_collate_fn = partial(
-            collate_fn, 
-            pad_token_id=tokenizer.pad_token_id, 
-            max_tokens=args.max_tokens)
-        sampler = DistributedSampler(
-            corpus, 
-            num_replicas=num_gpus, 
-            rank=args.local_rank, 
-            shuffle=True)
-        loader = DataLoader(
-            corpus, 
-            batch_size=args.prepare_batch_size_per_gpu, 
-            sampler=sampler,
-            collate_fn=partial_collate_fn)
-        data_iter = iter(loader)
-        sampler.set_epoch(0)
+        if not args.use_prepared_data:
+            corpus = build_dataset(env_conf, tokenizer)
+            partial_collate_fn = partial(
+                collate_fn, 
+                pad_token_id=tokenizer.pad_token_id, 
+                max_tokens=args.max_tokens)
+            sampler = DistributedSampler(
+                corpus, 
+                num_replicas=num_gpus, 
+                rank=args.local_rank, 
+                shuffle=True)
+            loader = DataLoader(
+                corpus, 
+                batch_size=args.prepare_batch_size_per_gpu, 
+                sampler=sampler,
+                collate_fn=partial_collate_fn)
+            data_iter = iter(loader)
+            sampler.set_epoch(0)
 
         # 构造优化器 & 学习率调节器
         optim, lr_adjust = get_optimizer_and_lr_adjuster(**env_conf['train'], params=params)
@@ -208,56 +211,58 @@ def train(args):
             beta=args.beta,
             margin=args.margin)
 
-        for inn_cycle_idx in range(num_inn_cycle):
+        for _ in range(num_inn_cycle):
 
-            # 加载数据准备模型
-            for gpu_id in range(num_gpus):
-                if args.local_rank == gpu_id:
-                    _, model = get_model_and_tokenizer(**env_conf['model'])
-                    model.eval()
+            if not args.use_prepared_data:
+                # 加载数据准备模型
+                _, model = get_model_and_tokenizer(**env_conf['model'])
+                model.eval()
                 dist.barrier()
 
-            increment = num_gpus * args.prepare_batch_size_per_gpu
-            executor = ThreadPoolExecutor(max_workers=args.max_prepare_workers)
-            futures = []
+                increment = num_gpus * args.prepare_batch_size_per_gpu
+                futures = []
 
-            for idx in tqdm.tqdm(range(0, args.instance_per_cycle, increment)):
+                for idx in tqdm.tqdm(range(0, args.instance_per_cycle, increment)):
 
-                inputs = next(data_iter)
-                length = inputs.get("input_len")
-                inputs.update({"return_inputs": True})
+                    inputs = next(data_iter)
+                    length = inputs.get("input_len")
+                    inputs.update({"return_inputs": True})
 
-                #前向传播 & 获取每层的输入数据
-                outputs = model(**inputs)
-                inputs = [outputs.hidden_states[i].cuda(args.local_rank) for i in layer_indices]
-                inputs = torch.stack(inputs, dim=0)
+                    #前向传播 & 获取每层的输入数据
+                    outputs = model(**inputs)
+                    inputs = [outputs.hidden_states[i].cuda(args.local_rank) for i in layer_indices]
+                    inputs = torch.stack(inputs, dim=0)
 
-                # 进程之间通信-1, 交换padded input hidden states
-                inputs_gather = [torch.empty_like(inputs) for _ in range(num_gpus)]
-                dist.all_gather(inputs_gather, inputs)
-                inputs_gather = [inputs[args.local_rank] for inputs in inputs_gather]
-                inputs_gather = torch.cat(inputs_gather, dim=0).cpu()
+                    # 进程之间通信-1, 交换padded input hidden states
+                    inputs_gather = [torch.empty_like(inputs) for _ in range(num_gpus)]
+                    dist.all_gather(inputs_gather, inputs)
+                    inputs_gather = [inputs[args.local_rank] for inputs in inputs_gather]
+                    inputs_gather = torch.cat(inputs_gather, dim=0).cpu()
 
-                # 进程之间通信-2, 交换input hidden states的尺寸
-                length = torch.tensor(length, dtype=torch.int64, device=args.local_rank)
-                length_gather = [torch.empty_like(length) for _ in range(num_gpus)]
-                dist.all_gather(length_gather, length)
-                length_gather = torch.cat(length_gather)
+                    # 进程之间通信-2, 交换input hidden states的尺寸
+                    length = torch.tensor(length, dtype=torch.int64, device=args.local_rank)
+                    length_gather = [torch.empty_like(length) for _ in range(num_gpus)]
+                    dist.all_gather(length_gather, length)
+                    length_gather = torch.cat(length_gather)
 
-                # 保存数据
-                buffer = (inputs_gather, length_gather)
-                buffer_file = f"buffer/inputs_buffer_rank_{args.local_rank}_{idx:05d}.pt"
+                    # 保存数据
+                    buffer = (inputs_gather, length_gather)
+                    buffer_file = f"buffer/inputs_buffer_rank_{args.local_rank}_{idx:05d}.pt"
 
-                future = executor.submit(torch.save, buffer, buffer_file)
-                futures.append(future)
-                if len(futures) >= args.max_prepare_workers:
-                    concurrent.futures.wait(futures)
-                    futures = []
+                    future = executor.submit(torch.save, buffer, buffer_file)
+                    futures.append(future)
+                    if len(futures) >= args.max_prepare_workers:
+                        concurrent.futures.wait(futures)
+                        futures = []
 
-            # 先准备好数据的进程等待未准备完成的进程
-            del model, inputs, outputs
-            clear_cache(args.local_rank)
-            dist.barrier()
+                # 先准备好数据的进程等待未准备完成的进程
+                del model, inputs, outputs
+                clear_cache(args.local_rank)
+                dist.barrier()
+
+                if args.prepare_data:
+                    print(f"RANK-{args.local_rank} data preparation finished.")
+                    return
 
             # 将buffer文件夹下的所有文件进行排序
             buffer_files = os.listdir("buffer")
@@ -349,7 +354,7 @@ def train(args):
             
             clear_cache(args.local_rank)
             dist.barrier()
-            reset_buffer_dir()
+            reset_buffer_dir(disable=args.use_prepared_data)
 
         # 创建目录
         save_path = args.env_conf.split('/')[-1]
@@ -383,6 +388,8 @@ if __name__ == '__main__':
     # 和模型无关的参数
     parser.add_argument("--env_conf", type=str, default=None)
     parser.add_argument("--local_rank", type=int, default=-1)
+    parser.add_argument("--prepare_data", action='store_true')
+    parser.add_argument("--use_prepared_data", action='store_true')
 
     # 和资源开销有关的参数
     parser.add_argument("--instance_per_cycle", type=int, default=1000)

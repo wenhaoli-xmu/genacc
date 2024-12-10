@@ -1,12 +1,14 @@
-test_scripts=("llama3-8b-genacc23.json")
+test_scripts=("llama3-8b-quest.json")
 
-chat_tempalte='llama-3'
 model_max_length=8192
 
 for test_script in "${test_scripts[@]}"
 do
+    rm -r pred/$test_script
+    mkdir pred/$test_script
+
     echo "Running prediction for ${test_script}..."
-    python test_longbench/pred.py --env_conf "test_longbench/${test_script}" --chat_template $chat_template --model_max_length $model_max_length
+    python test_longbench/pred.py --env_conf "test_longbench/${test_script}" --quest --model_max_length $model_max_length
 
     echo "Evaluating model for ${test_script}..."
     python LongBench/eval.py --model "${test_script}"

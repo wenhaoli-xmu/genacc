@@ -6,7 +6,7 @@ from tqdm import tqdm
 import numpy as np
 import random
 import argparse
-from tokenmix2.misc import get_model_and_tokenizer, get_tokenizer, get_torch_dtype
+from tokenmix2.misc import get_model_and_tokenizer, get_tokenizer
 
 from corpus.processor.conversations import get_conv_template
 
@@ -48,19 +48,6 @@ def post_process(response, model_name):
     elif "internlm" in model_name:
         response = response.split("<eoa>")[0]
     return response
-
-
-def load_tokenizer_and_model(env_conf):
-    tokenizer, model = get_model_and_tokenizer(**env_conf["model"])
-    ckp_file = env_conf['model']['save_ckp']
-    if os.path.exists(ckp_file):
-        print(f"load checkpoint {ckp_file}")
-        model.load_checkpoint(ckp_file)
-    else:
-        print(f"{ckp_file} dose not exists")
-    model.eval()
-
-    return tokenizer, model
 
 
 # modified: 将参数max_length去掉
@@ -116,36 +103,35 @@ def get_pred(
         # else:
         # =================================================================================================
 
-        # ======================================================
-        # NOTE: 供测试使用
+
+        # ======================================================================
+        # NOTE: right truncation
         if input.input_ids.shape[-1] >= model_max_length - max_gen:
             input.input_ids = input.input_ids[..., -model_max_length + max_gen:]
         context_length = input.input_ids.shape[-1]
-        # ======================================================
+        # ======================================================================
 
 
-        # ======================================================
+        # ============================================================================
         # NOTE: 新增加
         if magicpig:
-            output = model.predict(input_ids=input.input_ids)
+            prompt = tokenizer.decode(input.input_ids.ravel().tolist())
+            pred = model(prompt)['text'][0]
         else:
             output = model.generate(
                 input_ids=input.input_ids,
                 max_new_tokens=max_gen
             ).ravel().tolist()
-        # ======================================================
 
+            # NOTE: 新增加
+            if tokenizer.eos_token_id in output:
+                index = output.index(tokenizer.eos_token_id)
+                output = output[:index]
+            torch.cuda.empty_cache()
 
-        # ==============================================
-        # NOTE: 新增加
-        if tokenizer.eos_token_id in output:
-            index = output.index(tokenizer.eos_token_id)
-            output = output[:index]
-        torch.cuda.empty_cache()
-        # ==============================================
-
-
-        pred = tokenizer.decode(output[context_length:], skip_special_tokens=True)
+            pred = tokenizer.decode(output[context_length:], skip_special_tokens=True)
+        # ============================================================================
+        
         pred = post_process(pred, model_name)
 
         with open(out_path, "a", encoding="utf-8") as f:
@@ -226,11 +212,15 @@ if __name__ == '__main__':
 
     # load model
     if args.magicpig:
-        from tokenmix2.misc import get_magicpig
+        from tokenmix2.magicpig import get_magicpig, MagicpigConfig
         tokenizer = get_tokenizer(env_conf['model']['model_name'])
-        model = get_magicpig(env_conf['model']['model_name'], args.max_gen)
+        magicpig_config = MagicpigConfig(
+            model_name_or_path=env_conf['model']['model_name'],
+            max_new_tokens=args.max_gen,
+            max_seq_length=args.model_max_length)
+        model = get_magicpig(magicpig_config)
     else:
-        tokenizer, model = load_tokenizer_and_model(env_conf)
+        tokenizer, model = get_model_and_tokenizer(**env_conf["model"])
         if args.quest:
             from quest.evaluation.quest_attention import enable_quest_attention_eval
             enable_quest_attention_eval(model.model, args)

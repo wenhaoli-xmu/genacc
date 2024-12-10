@@ -164,12 +164,14 @@ class LlamaAttention(nn.Module):
 
            
             with sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
-                    attn_output = F.scaled_dot_product_attention(
-                        query_states,
-                        key_states,
-                        value_states,
-                        is_causal=True,
-                    )
+                attn_output = F.scaled_dot_product_attention(
+                query_states,
+                key_states,
+                value_states,
+                attn_mask=attention_mask,
+                dropout_p=0.0,
+                is_causal=False,
+            )
             attn_output = attn_output.transpose(1, 2).contiguous()
             attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
             attn_output = self.o_proj(attn_output)
@@ -713,15 +715,14 @@ class LlamaModel(LlamaPreTrainedModel):
         if (
             use_cache and (isinstance(past_key_values, DynamicCache) or past_key_values is None)
         ):  # kept for BC (non `Cache` `past_key_values` inputs)
-            past_key_values = SimCache(
-                K=self.config.K, 
-                L=self.config.L,
-                mode=self.config.cache_mode,
-                window=self.config.window,
-                num_qh=self.config.num_attention_heads,
-                num_kh=self.config.num_key_value_heads,
-                num_layers=self.config.num_hidden_layers,
-                dtype=self.dtype)
+            past_key_values = SimCache(K=self.config.K, 
+                                           L=self.config.L,
+                                           mode=self.config.cache_mode,
+                                           window=self.config.window,
+                                           num_qh=self.config.num_attention_heads,
+                                           num_kh=self.config.num_key_value_heads,
+                                           num_layers=self.config.num_hidden_layers,
+                                           dtype=self.dtype)
 
         if cache_position is None:
             past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
@@ -738,7 +739,9 @@ class LlamaModel(LlamaPreTrainedModel):
         hidden_states = inputs_embeds
               
         # create position embeddings to be shared across the decoder layers
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)        
+        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+
+        
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
@@ -836,7 +839,6 @@ class LlamaModel(LlamaPreTrainedModel):
         dtype, device = input_tensor.dtype, input_tensor.device
         min_dtype = torch.finfo(dtype).min
         sequence_length = input_tensor.shape[1]
-
         if using_static_cache:
             target_length = past_key_values.get_max_length()
         else:

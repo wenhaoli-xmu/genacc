@@ -201,28 +201,6 @@ def get_tokenizer(
     return tokenizer
 
 
-def get_magicpig(
-        model_name,
-        max_new_tokens,
-        **kwargs
-):
-    from .magicpig.model_wrappers import HuggingFaceModel
-    torch.backends.cudnn.deterministic = True
-    llm = HuggingFaceModel(
-        name_or_path=model_name,
-        top_k=32,
-        top_p=1.0,
-        K=9,
-        L=200,
-        W=32,
-        S=0.05,
-        Q=0,
-        QR=0.05,
-        max_new_tokens=max_new_tokens,
-        stop='')
-    return llm
-
-
 def get_model_and_tokenizer(
         model_name, 
         model_dtype, 
