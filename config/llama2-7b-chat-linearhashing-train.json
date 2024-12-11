@@ -1,10 +1,10 @@
 {
     "draft_kwargs": {
-        "enable": true,
-        "fix_layers": [0,1],
+        "enable": false,
+        "fix_layers": [],
         "mask_out": 0.98,
         "bench_mark": false,
-        "min_remain": 0
+        "gamma": 64
     },
 
     "enable_lora": false,

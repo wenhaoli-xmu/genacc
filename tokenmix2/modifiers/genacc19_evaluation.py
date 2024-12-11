@@ -368,7 +368,6 @@ class MLPHashingFunction(torch.nn.Module):
         mlp.append(MLPLayer(info, True))
         mlp.append(MLPLayer(info, False))
         self.mlp = mlp
-        
 
     def forward(self, x):
         for module in self.mlp:
@@ -416,19 +415,19 @@ class Decoder(torch.nn.Module):
                 del layer.self_attn.v_cache
 
 
-    def __init__(
-            self, 
-            decoder, 
-            enable_lora: bool = False,
-            lora_kwargs: dict = None,
-            fix_layers: list = [],
-            draft_kwargs: dict = {"use_draft": False}):
+    def __init__(self, decoder, draft_kwargs):
 
         super().__init__()
         self.decoder = decoder
         self.enable_lora = False
-        
+
         fix_layers = draft_kwargs.get('fix_layers', [])
+        num_mlp_layers = draft_kwargs.get('num_mlp_layers', 2)
+        mlp_dims = draft_kwargs.get('mlp_dims', '[128,128,128]')
+        mlp_residue = draft_kwargs.get('mlp_residue', True)
+
+        mlp_dims = json.loads(mlp_dims)
+
         self.fix_layers = fix_layers
         self.draft_kwargs = draft_kwargs
 
@@ -465,8 +464,8 @@ class Decoder(torch.nn.Module):
 
     def get_ratios(self, reset=False):
         ratios = []
-        for idx, layer in enumerate(self.layers):
-            if idx in self.fix_layers:
+        for layer in self.layers:
+            if layer.self_attn.is_fix_layer:
                 ratios.append(None)
             else:
                 ratios.append(layer.self_attn.ratios)
@@ -483,20 +482,25 @@ class Decoder(torch.nn.Module):
 
     def ft_params(self, layer=None):
         params = []
+
         for layer in self.layers:
-            params += layer.self_attn.hash_fn.parameters()
+            if not layer.self_attn.is_fix_layer:
+                params += layer.self_attn.hash_fn.parameters()
+
         return list(params)
 
 
     def forward(
             self, 
             input_ids, 
-            labels=None):
+            labels=None,
+            kv_cache=None):
 
         # decoder forward
         outputs = self.decoder(
             input_ids=input_ids, 
-            labels=labels)
+            labels=labels,
+            kv_cache=kv_cache)
 
         return outputs
 
@@ -521,6 +525,7 @@ class Model(torch.nn.Module):
     def forward(
             self,
             input_ids,
+            kv_cache=None,
             labels=None,
             local_rank=None,
             **kwargs
@@ -546,7 +551,8 @@ class Model(torch.nn.Module):
 
         outputs = self.decoder(
             input_ids, 
-            labels=labels)
+            labels=labels,
+            kv_cache=kv_cache)
 
         return outputs
 
@@ -555,21 +561,10 @@ class Genacc19(Modifier):
     def __init__(self, model, save_ckp, load_ckp, config):
         self.get_conf(config)
         assert isinstance(self.conf, dict)
-        enable_lora = self.conf["enable_lora"]
-        lora_kwargs = self.conf["lora_kwargs"]
-
         draft_kwargs = self.conf['draft_kwargs']
-        fix_layers = [] if "fix_layers" not in self.conf else self.conf["fix_layers"]
         
-        decoder = Decoder(
-            model, 
-            enable_lora=enable_lora,
-            lora_kwargs=lora_kwargs,
-            fix_layers=fix_layers,
-            draft_kwargs=draft_kwargs)
-
+        decoder = Decoder(model, draft_kwargs=draft_kwargs)
         decoder = Model(decoder)
-
         super().__init__(decoder, save_ckp, load_ckp)
 
 
@@ -604,14 +599,18 @@ class Genacc19(Modifier):
         input_ids = input_ids.to(device)
 
         # prefilling
-        prefill_ids = input_ids[:, :-1]
-        self.model(input_ids=prefill_ids)
+        output = self.model(input_ids=input_ids)
+        logits, kv_cache = output.logits, output.past_key_values
+        new_tok = logits.argmax(dim=-1)
+        new_ids = [new_tok]
 
         # generation
         new_tok = input_ids[:, -1:]
         new_ids = []
         while len(new_ids) < max_new_tokens:
-            logits = self.model(input_ids=new_tok).logits
+            output = self.model(input_ids=new_tok, kv_cache=kv_cache)
+            logits, kv_cache = output.logits, output.past_key_values
+
             new_tok = logits.argmax(dim=-1)
             if new_tok.ravel().item() in eos_token_id: break
             new_ids.append(new_tok.ravel().item())

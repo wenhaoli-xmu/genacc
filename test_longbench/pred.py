@@ -7,6 +7,7 @@ import numpy as np
 import random
 import argparse
 from tokenmix2.misc import get_model_and_tokenizer, get_tokenizer
+from tokenmix2.modifiers.greedy_generation import Greedy
 
 from corpus.processor.conversations import get_conv_template
 
@@ -18,36 +19,7 @@ def build_chat(tokenizer, prompt, model_name, chat_template):
         conv.append_message(conv.roles[0], prompt)
         conv.append_message(conv.roles[1], None)
         prompt = conv.get_prompt()
-        return prompt
-
-    if "chatglm3" in model_name:
-        prompt = tokenizer.build_chat_input(prompt)
-    elif "chatglm" in model_name:
-        prompt = tokenizer.build_prompt(prompt)
-    elif "longchat" in model_name or "vicuna" in model_name:
-        from fastchat.model import get_conversation_template
-        conv = get_conversation_template("vicuna")
-        conv.append_message(conv.roles[0], prompt)
-        conv.append_message(conv.roles[1], None)
-        prompt = conv.get_prompt()
-    elif "llama2" in model_name:
-        prompt = f"[INST]{prompt}[/INST]"
-    elif "xgen" in model_name:
-        header = (
-            "A chat between a curious human and an artificial intelligence assistant. "
-            "The assistant gives helpful, detailed, and polite answers to the human's questions.\n\n"
-        )
-        prompt = header + f" ### Human: {prompt}\n###"
-    elif "internlm" in model_name:
-        prompt = f"<|User|>:{prompt}<eoh>\n<|Bot|>:"
     return prompt
-
-def post_process(response, model_name):
-    if "xgen" in model_name:
-        response = response.strip().replace("Assistant:", "")
-    elif "internlm" in model_name:
-        response = response.split("<eoa>")[0]
-    return response
 
 
 # modified: 将参数max_length去掉
@@ -131,8 +103,7 @@ def get_pred(
 
             pred = tokenizer.decode(output[context_length:], skip_special_tokens=True)
         # ============================================================================
-        
-        pred = post_process(pred, model_name)
+
 
         with open(out_path, "a", encoding="utf-8") as f:
             json.dump({"pred": pred, "answers": json_obj["answers"], "all_classes": json_obj["all_classes"], "length": json_obj["length"]}, f, ensure_ascii=False)
@@ -159,6 +130,7 @@ if __name__ == '__main__':
 
     # Quest related arguments (http://arxiv.org/abs/2406.10774)
     parser.add_argument('--quest', action='store_true')
+    parser.add_argument('--greedy', action='store_true') # also used in magicpig
     parser.add_argument('--token_budget', type=int, default=1024, help='only used for quest')
     parser.add_argument('--chunk_size', type=int, default=16, help='only used for quest')
 
@@ -166,15 +138,6 @@ if __name__ == '__main__':
     parser.add_argument('--magicpig', action='store_true')
     parser.add_argument('--device_budget', type=int, default=68)
     args = parser.parse_args()
-
-    # model max length auto inference
-    if args.model_max_length == 0:
-        if 'llama2' in args.env_conf:
-            args.model_max_length = 4096
-        elif 'llama3' in args.env_conf:
-            args.model_max_length = 8192
-        else:
-            raise NotImplementedError
 
     import json, os
     with open(args.env_conf, "r") as f:
@@ -224,6 +187,8 @@ if __name__ == '__main__':
         if args.quest:
             from quest.evaluation.quest_attention import enable_quest_attention_eval
             enable_quest_attention_eval(model.model, args)
+            if args.greedy:
+                model = Greedy(model)
 
     for dataset in datasets:
         if args.e:

@@ -432,9 +432,7 @@ class Decoder(torch.nn.Module):
             layer.self_attn.draft_kwargs = draft_kwargs
             layer.forward = types.MethodType(layer_forward, layer)
             layer.self_attn.forward = types.MethodType(self_attn_forward, layer.self_attn)
-
-            if not layer.self_attn.is_fix_layer:
-                layer.self_attn.hash_fn = LinearHashingFunction(info)
+            layer.self_attn.hash_fn = LinearHashingFunction(info)
 
 
     def is_benchmark_mode(self):
@@ -462,18 +460,13 @@ class Decoder(torch.nn.Module):
 
     def layer_ft_params(self, layer):
         layer = self.layers[layer]
-        if layer.self_attn.is_fix_layer:
-            return []
         return list(layer.self_attn.hash_fn.parameters())
 
 
     def ft_params(self, layer=None):
         params = []
-
         for layer in self.layers:
-            if not layer.self_attn.is_fix_layer:
-                params += layer.self_attn.hash_fn.parameters()
-
+            params += layer.self_attn.hash_fn.parameters()
         return list(params)
 
 

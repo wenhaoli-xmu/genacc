@@ -1,87 +1,25 @@
 import torch
 import types
-from .modify_llama import do_sdpa_attn, do_draft_attn_via_down_proj, generate_mask, get_attn_score, check_and_apply_qk_rope, segment
+from .modify_llama import do_sdpa_attn, check_and_apply_qk_rope
 from transformers.models.llama.modeling_llama import CausalLMOutputWithPast, repeat_kv, CrossEntropyLoss
-from torch.utils.checkpoint import checkpoint
 from ..modifier import Modifier
 from peft import get_peft_model, LoraConfig, TaskType
 
-from typing import List, Tuple, Optional
-from profiler import WallTime
-import tqdm
+from typing import List, Tuple
+import json
 
 
-@torch.no_grad()
-def log_diffs(true_attn, draft_attn, layer_idx):
-    mask = torch.triu(torch.ones(true_attn.shape[-2:], dtype=torch.bool, device=true_attn.device), diagonal=1)[None, None, :, :]
-    true_attn = torch.masked_fill(true_attn, mask, value=torch.finfo(true_attn.dtype).min)
-    indices = torch.argsort(true_attn, dim=-1, descending=True)
-
-    top_cnt = int(indices.shape[-1] * 0.02)
-    top_indices = indices[..., :top_cnt]
-    oth_indices = indices[..., top_cnt:]
-
-    top_mask = torch.gather(mask.expand_as(true_attn), dim=-1, index=top_indices)[..., :, None]
-    oth_mask = torch.gather(mask.expand_as(true_attn), dim=-1, index=oth_indices)[..., None, :]
-
-    top_draft_attn = torch.gather(draft_attn, dim=-1, index=top_indices)[..., :, None]
-    oth_draft_attn = torch.gather(draft_attn, dim=-1, index=oth_indices)[..., None, :]
-
-    total_diff = 0
-    total_compare = 0
-
-    for top_seg, oth_seg, top_mask_seg, oth_mask_seg in tqdm.tqdm(
-        zip(
-        segment(top_draft_attn, dim=1, n=1),
-        segment(oth_draft_attn, dim=1, n=1),
-        segment(top_mask, dim=1, n=1),
-        segment(oth_mask, dim=1, n=1)),
-        desc=f'layer-{layer_idx}'
-    ):
-
-        residual = (top_seg - oth_seg)
-        residual_mask = (top_mask_seg | oth_mask_seg).expand_as(residual).flatten(-3)
-        logits = residual.flatten(-3)[~residual_mask.bool()]
-
-        diff = torch.count_nonzero(logits < 0)
-        compare = logits.numel()
-
-        total_diff += diff
-        total_compare += compare
-
-    # 算一下排序误差
-    diff = total_diff / total_compare
-    print(f"diff: {diff.item():<.3f}")
-
-
-def get_attn_score_using_angle_lsh(query, key, rot_mat1, rot_mat2, relu, cos, sin):
+def get_attn_score_using_angle_lsh(query, key, hash_fn, cos, sin):
     query, key = check_and_apply_qk_rope(query, key, cos, sin)
 
-    q_inner = relu(query @ rot_mat1) @ rot_mat2
-    k_inner = relu(key @ rot_mat1) @ rot_mat2
+    q_inner = hash_fn(query)
+    k_inner = hash_fn(key)
 
     q_hash = torch.sign(q_inner)
     k_hash = torch.sign(k_inner)
 
     sim = q_hash @ k_hash.transpose(-1,-2)
     return sim
-
-
-def random_rotation_matrix(dim, dtype, device):
-    """
-    随机生成一个 n 维旋转矩阵
-    :param dim: 维度大小 (n)
-    :return: n x n 随机旋转矩阵
-    """
-    # 使用QR分解生成随机正交矩阵
-    random_matrix = torch.randn((dim, dim), dtype=torch.float64)
-    q, r = torch.linalg.qr(random_matrix)
-    
-    # 调整使其行列式为1
-    if torch.det(q) < 0:
-        q[:, 0] *= -1
-
-    return q.type(dtype).to(device)
 
 
 def model_forward(
@@ -96,7 +34,7 @@ def model_forward(
         input_ids=input_ids,
         kv_cache=kv_cache)
     
-    logits = self.lm_head(hidden_states).float()
+    logits = self.lm_head(hidden_states[..., -1:,:]).float()
 
     loss = None
     if labels is not None:
@@ -196,7 +134,7 @@ def self_attn_forward(
 
     kv_cache = (keys.data, vals.data)
 
-    cos, sin = self.rotary_emb(vals, seq_len=4096)
+    cos, sin = self.rotary_emb(vals, seq_len=8192)
     cond1 = self.draft_kwargs['enable'] is True
     cond2 = not self.is_fix_layer
     cond3 = not is_prefill  # pre-filling阶段不使用draft attention
@@ -206,9 +144,7 @@ def self_attn_forward(
         draft_score = get_attn_score_using_angle_lsh(
             query=ques, 
             key=keys, 
-            rot_mat1=self.rot_mat1,
-            rot_mat2=self.rot_mat2, 
-            relu=self.relu1, 
+            hash_fn=self.hash_fn, 
             cos=cos, 
             sin=sin)
 
@@ -221,7 +157,12 @@ def self_attn_forward(
         num_kv_pair = draft_score.shape[-1]
         num_remain = num_kv_pair - int(num_kv_pair * self.draft_kwargs['mask_out'])
         num_remain = max(min(num_kv_pair, self.draft_kwargs['min_remain']), num_remain)
-        draft_indices = aggregate_topk(draft_score, num_remain)
+        
+        # ==============================================================
+        # NOTE: test
+        # ==============================================================
+        
+        draft_indices = aggregate_topk(draft_score, draft_score.shape[-1])
 
         # =========================================================================================================
         # NOTE: test
@@ -285,6 +226,31 @@ def self_attn_forward(
     return attn_output, kv_cache
 
 
+class MLPLayer(torch.nn.Module):
+    def __init__(self, info, in_features, out_features, silu=False):
+        super().__init__()
+        get_init_value = lambda: torch.randn((1,32,in_features,out_features), **info)
+        self.proj = torch.nn.Parameter(get_init_value(), requires_grad=True)
+        self.silu = torch.nn.SiLU() if silu else torch.nn.Identity()
+
+    def forward(self, x):
+        return self.silu(x @ self.proj)
+
+
+class MLPHashingFunction(torch.nn.Module):
+    def __init__(self, info):
+        super().__init__()
+        mlp = torch.nn.ModuleList()
+        mlp.append(MLPLayer(info, 128, 128, True))
+        mlp.append(MLPLayer(info, 128, 128, False))
+        self.mlp = mlp
+
+    def forward(self, x):
+        for module in self.mlp:
+            x = module(x)
+        return x
+
+
 class Decoder(torch.nn.Module):
     def _init_lora(
             self,
@@ -325,17 +291,19 @@ class Decoder(torch.nn.Module):
                 del layer.self_attn.v_cache
 
 
-    def __init__(
-            self, 
-            decoder, 
-            enable_lora: bool = False,
-            lora_kwargs: dict = None,
-            fix_layers: list = [],
-            draft_kwargs: dict = {"use_draft": False}):
+    def __init__(self, decoder, draft_kwargs):
 
         super().__init__()
         self.decoder = decoder
         self.enable_lora = False
+
+        fix_layers = draft_kwargs.get('fix_layers', [])
+        num_mlp_layers = draft_kwargs.get('num_mlp_layers', 2)
+        mlp_dims = draft_kwargs.get('mlp_dims', '[128,128,128]')
+        mlp_residue = draft_kwargs.get('mlp_residue', True)
+
+        mlp_dims = json.loads(mlp_dims)
+
         self.fix_layers = fix_layers
         self.draft_kwargs = draft_kwargs
 
@@ -355,17 +323,7 @@ class Decoder(torch.nn.Module):
             layer.self_attn.draft_kwargs = draft_kwargs
             layer.forward = types.MethodType(layer_forward, layer)
             layer.self_attn.forward = types.MethodType(self_attn_forward, layer.self_attn)
-
-            def get_rot_mat():
-                rot_mats = []
-                for _ in range(32):
-                    rot_mats.append(random_rotation_matrix(dim=128, **info))
-                return torch.stack(rot_mats, dim=0).unsqueeze(0)
-
-            if not layer.self_attn.is_fix_layer:
-                layer.self_attn.rot_mat1 = torch.nn.Parameter(get_rot_mat(), requires_grad=True)
-                layer.self_attn.relu1 = torch.nn.SiLU()
-                layer.self_attn.rot_mat2 = torch.nn.Parameter(get_rot_mat(), requires_grad=True)
+            layer.self_attn.hash_fn = MLPHashingFunction(info)
 
 
     def is_benchmark_mode(self):
@@ -382,8 +340,8 @@ class Decoder(torch.nn.Module):
 
     def get_ratios(self, reset=False):
         ratios = []
-        for idx, layer in enumerate(self.layers):
-            if idx in self.fix_layers:
+        for layer in self.layers:
+            if layer.self_attn.is_fix_layer:
                 ratios.append(None)
             else:
                 ratios.append(layer.self_attn.ratios)
@@ -395,20 +353,17 @@ class Decoder(torch.nn.Module):
         layer = self.layers[layer]
         if layer.self_attn.is_fix_layer:
             return []
-        return [layer.self_attn.rot_mat1, layer.self_attn.rot_mat2]
+        return list(layer.self_attn.hash_fn.parameters())
 
 
-    def ft_params(self):
+    def ft_params(self, layer=None):
         params = []
 
         for layer in self.layers:
             if not layer.self_attn.is_fix_layer:
-                params += [
-                    layer.self_attn.rot_mat1,
-                    layer.self_attn.rot_mat2,
-                ]
+                params += layer.self_attn.hash_fn.parameters()
 
-        return params
+        return list(params)
 
 
     def forward(
@@ -482,21 +437,10 @@ class Genacc19(Modifier):
     def __init__(self, model, save_ckp, load_ckp, config):
         self.get_conf(config)
         assert isinstance(self.conf, dict)
-        enable_lora = self.conf["enable_lora"]
-        lora_kwargs = self.conf["lora_kwargs"]
-
         draft_kwargs = self.conf['draft_kwargs']
-        fix_layers = [] if "fix_layers" not in self.conf else self.conf["fix_layers"]
         
-        decoder = Decoder(
-            model, 
-            enable_lora=enable_lora,
-            lora_kwargs=lora_kwargs,
-            fix_layers=fix_layers,
-            draft_kwargs=draft_kwargs)
-
+        decoder = Decoder(model, draft_kwargs=draft_kwargs)
         decoder = Model(decoder)
-
         super().__init__(decoder, save_ckp, load_ckp)
 
 

@@ -1,8 +1,7 @@
 from ..modifier import Modifier
-import torch
 
 
-class LlamaOrigin(Modifier):
+class Origin(Modifier):
     def __init__(self, model, save_ckp, load_ckp, config):
         super().__init__(model, save_ckp, load_ckp)
 

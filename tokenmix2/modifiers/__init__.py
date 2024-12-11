@@ -1,8 +1,12 @@
-def get_modifier(method: str, model_type: str):
+def get_modifier(method: str, model_type: str = None):
 
     if method == "origin":
-        from .modify_llama_origin import LlamaOrigin
-        return None, LlamaOrigin
+        from .origin import Origin
+        return None, Origin
+    
+    if method == 'greedy':
+        from .greedy_generation import Greedy
+        return None, Greedy
 
     elif method == 'spotlight-train':
         from .spotlight_train import Spotlight
@@ -23,6 +27,10 @@ def get_modifier(method: str, model_type: str):
     elif method == 'genacc19-generation':
         from .genacc19_generation import Genacc19
         return None, Genacc19
+    
+    elif method == 'linearhashing-train':
+        from .linearhashing_train import LinearHashing
+        return None, LinearHashing
     
     elif method == 'linearhashing-evaluation':
         from .linearhashing_evaluation import LinearHashing

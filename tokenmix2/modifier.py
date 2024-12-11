@@ -84,7 +84,6 @@ class Modifier(torch.nn.Module):
         ckp = ckp if ckp is not None else self.save_ckp
         torch.save([maybe_zero_3(param) for param in self.ft_params()], ckp)
 
-
     def generate(self, *args, **kwargs):
         return self.model.generate(*args, **kwargs)
 

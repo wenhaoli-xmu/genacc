@@ -57,15 +57,6 @@ if __name__ == '__main__':
             head_ratio = sum(head_ratio) // len(head_ratio)
             print(get_color(head_ratio), end=' ')
 
-
-    ckp_file = env_conf['model']['save_ckp']
-    if os.path.exists(ckp_file):
-        print(f"load checkpoint {ckp_file}")
-        model.load_checkpoint(ckp_file)
-    else:
-        print(f"{ckp_file} dose not exists")
-
-
     if args.parameter is not None:
         for file in os.listdir(args.parameter):
             layer_idx = int(file.split('.')[0])
@@ -81,7 +72,6 @@ if __name__ == '__main__':
                 container.data = data
 
             print(f"layer-{layer_idx} loaded.")
-
 
     evaluator_class = Evaluator
 

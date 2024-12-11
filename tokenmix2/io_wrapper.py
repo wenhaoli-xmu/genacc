@@ -197,7 +197,7 @@ class TestIOWrapper(BasicIOWrapper):
         input_ids = text.input_ids[:,:truncation]
 
         def compute_ppl(outputs, input_ids):
-            logits = outputs.logits.log_softmax(dim=-1).cpu()
+            logits = outputs.logits.cpu().log_softmax(dim=-1)
             gold_indices = input_ids[:,-logits.shape[1] + 1:].cpu()
             logprobs = [None] + torch.gather(logits, -1, gold_indices.unsqueeze(-1)).squeeze(-1).squeeze(0).detach().cpu().tolist()
             return logprobs[1:]

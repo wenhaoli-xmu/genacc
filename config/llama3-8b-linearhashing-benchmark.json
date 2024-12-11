@@ -3,7 +3,7 @@
         "enable": true,
         "fix_layers": [0,1],
         "mask_out": 0.98,
-        "bench_mark": false,
+        "bench_mark": true,
         "min_remain": 0
     },
 
