@@ -1,16 +1,13 @@
 #!/bin/bash
 
 # Define parameters
-chat_template="llama-2"
-s_len=128
-e_len=4096
-step=128
+chat_template=default
+s_len=256
+e_len=8192
+step=256
 
 # Define configurations
-configs=(
-    "llama2-7b-chat.json"
-    "llama2-7b-chat-maskout98.json"
-    "llama2-7b-chat-maskout90.json")
+configs=("llama3-8b.json" "llama3-8b-spotlight.json")
 
 # Loop through each configuration
 for config in "${configs[@]}"; do

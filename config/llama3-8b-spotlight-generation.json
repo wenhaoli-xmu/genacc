@@ -4,7 +4,7 @@
         "fix_layers": [0,1],
         "mask_out": 0.98,
         "bench_mark": false,
-        "min_remain": 0,
+        "min_remain": 20,
         "mlp_random_init": true,
         "num_mlp_layers": 2,
         "mlp_dims": "[128,128,128]",

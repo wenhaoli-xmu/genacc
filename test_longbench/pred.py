@@ -127,6 +127,7 @@ if __name__ == '__main__':
     parser.add_argument("--chat_template", type=str, default=None)
     parser.add_argument("--max_gen", type=int, default=None)
     parser.add_argument('--e', action='store_true', help="Evaluate on LongBench-E")
+    parser.add_argument('--time_stamp', type=str)
 
     # Quest related arguments (http://arxiv.org/abs/2406.10774)
     parser.add_argument('--quest', action='store_true')
@@ -181,6 +182,7 @@ if __name__ == '__main__':
             model_name_or_path=env_conf['model']['model_name'],
             max_new_tokens=args.max_gen,
             max_seq_length=args.model_max_length)
+        magicpig_config.do_sample = not args.greedy
         model = get_magicpig(magicpig_config)
     else:
         tokenizer, model = get_model_and_tokenizer(**env_conf["model"])

@@ -1,4 +1,4 @@
-test_scripts=("llama2-7b-genacc19.json")
+test_scripts=("llama3-8b-spotlight.json")
 
 for test_script in "${test_scripts[@]}"
 do

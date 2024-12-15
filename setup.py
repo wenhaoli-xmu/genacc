@@ -1,8 +1,8 @@
 from setuptools import setup
 
 setup(
-    name='tokenmix2',
+    name='spotlight',
     version='1.0',
-    packages=['tokenmix2'],
+    packages=['spotlight'],
     install_requires=[]
 )

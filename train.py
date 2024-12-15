@@ -39,7 +39,6 @@ def compute_attn_supervise_loss(
 
     indices = torch.argsort(true_attn, dim=-1, descending=True)
 
-    # 切分出来top 0.01 的indices，和other 0.98的indices
     top_cnt = int(indices.shape[-1] * (1 - maskout))
     top_indices = indices[..., :top_cnt]
     oth_indices = indices[..., top_cnt:]
@@ -133,7 +132,6 @@ def reset_buffer_dir(disable):
 def train(args):
     deepspeed.init_distributed()
 
-    # 计算一些变量 & 例行检查
     env_conf = get_env_conf(args.env_conf)
     num_gpus = dist.get_world_size()
     if not os.path.exists("buffer"):
@@ -151,17 +149,17 @@ def train(args):
     num_out_cycle = args.num_layers // num_gpus
     executor = ThreadPoolExecutor(max_workers=args.max_prepare_workers)
 
-    # 开始训练pipeline
+    # start training
     for out_cycle_idx in range(num_out_cycle):
         torch.manual_seed(42)
 
-        # 加载模型 & tokenizer
+        # load model and tokenizer
         layer_idx = out_cycle_idx * num_gpus + args.local_rank
         layer_indices = [out_cycle_idx * num_gpus + i for i in range(num_gpus)]
         env_conf["model"]["device_map"] = {"": args.local_rank}
         tokenizer, model = get_model_and_tokenizer(**env_conf['model'])
 
-        # 将模型只保存某个layer
+        # delete other layers except the current training one
         model.train()
         model.freeze_model()
         model.unfreeze_model()
@@ -172,7 +170,7 @@ def train(args):
         print(f"RANK-{args.local_rank} training started !")
         dist.barrier()
 
-        # 构造数据集
+        # construct dataloader
         if not args.use_prepared_data:
             corpus = build_dataset(env_conf, tokenizer)
             partial_collate_fn = partial(
@@ -192,10 +190,10 @@ def train(args):
             data_iter = iter(loader)
             sampler.set_epoch(0)
 
-        # 构造优化器 & 学习率调节器
+        # construct optimizer and learning rate adjuster
         optim, lr_adjust = get_optimizer_and_lr_adjuster(**env_conf['train'], params=params)
         
-        # 一些参数
+        # gradient related parameters
         accum_grad = env_conf["train"]["accum_grad"]
         clip_grad = env_conf["train"]["clip_grad"]
         step = 0
@@ -228,24 +226,24 @@ def train(args):
                     length = inputs.get("input_len")
                     inputs.update({"return_inputs": True})
 
-                    #前向传播 & 获取每层的输入数据
+                    # forward pass
                     outputs = model(**inputs)
                     inputs = [outputs.hidden_states[i].cuda(args.local_rank) for i in layer_indices]
                     inputs = torch.stack(inputs, dim=0)
 
-                    # 进程之间通信-1, 交换padded input hidden states
+                    # inter-process communication-1, exchange the hidden states
                     inputs_gather = [torch.empty_like(inputs) for _ in range(num_gpus)]
                     dist.all_gather(inputs_gather, inputs)
                     inputs_gather = [inputs[args.local_rank] for inputs in inputs_gather]
                     inputs_gather = torch.cat(inputs_gather, dim=0).cpu()
 
-                    # 进程之间通信-2, 交换input hidden states的尺寸
+                    # inter-process communication-2, exchange the input sequence length
                     length = torch.tensor(length, dtype=torch.int64, device=args.local_rank)
                     length_gather = [torch.empty_like(length) for _ in range(num_gpus)]
                     dist.all_gather(length_gather, length)
                     length_gather = torch.cat(length_gather)
 
-                    # 保存数据
+                    # save datga
                     buffer = (inputs_gather, length_gather)
                     buffer_file = f"buffer/inputs_buffer_rank_{args.local_rank}_{idx:05d}.pt"
 
@@ -255,7 +253,7 @@ def train(args):
                         concurrent.futures.wait(futures)
                         futures = []
 
-                # 先准备好数据的进程等待未准备完成的进程
+                # wait for all process to finish data preprocessing
                 del model, inputs, outputs
                 clear_cache(args.local_rank)
                 dist.barrier()
@@ -264,20 +262,20 @@ def train(args):
                     print(f"RANK-{args.local_rank} data preparation finished.")
                     return
 
-            # 将buffer文件夹下的所有文件进行排序
+            # sort the buffer files according to their IDs
             buffer_files = os.listdir("buffer")
             buffer_files = sorted(filter(
                 lambda x: x.startswith(f"inputs_buffer_rank_{args.local_rank}"), 
                 buffer_files))
 
-            # 先读取第1个数据
+            # read the first buffer file
             inputs_gather, length_gather = torch.load(os.path.join("buffer", buffer_files[0]))
             buffer_files = [*buffer_files[1:], buffer_files[0]]
 
-            # 遍历所有的buffer files
+            # traverse remaining buffer files
             for buffer_file in buffer_files:
 
-                # 下一个数据的prefetch
+                # prefetch next file
                 future = executor.submit(torch.load, os.path.join("buffer", buffer_file))
 
                 for hidden_states, length in zip(inputs_gather, length_gather):
@@ -322,7 +320,7 @@ def train(args):
                         grad /= accum_grad
                         draft_attn.backward(gradient=grad)
                     else:
-                        # direct calculation
+                        # direct calculation (NOTE: will cause mask selection error in training 8192 length models)
                         diff, loss = compute_loss(draft_attn, true_attn, random_query_index)
                         history_loss.append(loss.item())
                         history_diff.append(diff.item())
@@ -338,10 +336,10 @@ def train(args):
 
                     step += 1
 
-                # 已经prefetch好的数据
+                # get the already prefetched data
                 inputs_gather, length_gather = future.result()
 
-            # 输出训练的过程信息
+            # output key informantion
             print(f"layer: {layer_idx}\t\
                     step: {step}\t\
                     loss: {sum(history_loss) / len(history_loss):<.3f}\t\
@@ -356,19 +354,19 @@ def train(args):
             dist.barrier()
             reset_buffer_dir(disable=args.use_prepared_data)
 
-        # 创建目录
+        # create directories
         save_path = args.env_conf.split('/')[-1]
         if dist.get_rank() == 0:
             if not os.path.exists(f"train_results/{save_path}"):
                 os.mkdir(f"train_results/{save_path}")
         dist.barrier()
 
-        # 保存训练好的参数
+        # save layerwise weight files
         torch.save(list(params), f"train_results/{save_path}/{layer_idx}.pth")
         print(f"RANK-{args.local_rank} training done !")
         dist.barrier()
 
-        # 清空缓存
+        # clear buffer
         del layer, optim
         clear_cache(args.local_rank)
         dist.barrier()
@@ -377,7 +375,7 @@ def train(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
-    # 和模型结构有关的参数，需要根据模型的不同而相应地调整
+    # model related parameters (NOTE: need to change according to the base model)
     parser.add_argument("--num_layers", type=int, default=32)
     parser.add_argument("--max_tokens", type=int, default=4096)
     parser.add_argument("--hidden_size", type=int, default=4096)
@@ -385,13 +383,13 @@ if __name__ == '__main__':
     parser.add_argument("--beta", type=float, default=1.0)
     parser.add_argument("--margin", type=float, default=-10.0)
 
-    # 和模型无关的参数
+    # model non-related parameters
     parser.add_argument("--env_conf", type=str, default=None)
     parser.add_argument("--local_rank", type=int, default=-1)
     parser.add_argument("--prepare_data", action='store_true')
     parser.add_argument("--use_prepared_data", action='store_true')
 
-    # 和资源开销有关的参数
+    # resource controling related parameters
     parser.add_argument("--instance_per_cycle", type=int, default=1000)
     parser.add_argument("--prepare_batch_size_per_gpu", type=int, default=1)
     parser.add_argument("--max_prepare_workers", type=int, default=4)

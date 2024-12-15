@@ -4,7 +4,7 @@
         "fix_layers": [0,1],
         "mask_out": 0.98,
         "bench_mark": false,
-        "min_remain": 0
+        "min_remain": 20
     },
 
     "enable_lora": false,

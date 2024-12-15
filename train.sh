@@ -1,4 +1,4 @@
-train_script=train/llama2-7b-chat-linearhashing.json
+train_script=train/llama2-7b-chat-spotlight.json
 
 deepspeed \
     --include localhost:6,7 \
@@ -6,7 +6,7 @@ deepspeed \
     --num_layers 32 \
     --max_tokens 4096 \
     --env_conf $train_script \
-    --instance_per_cycle 2048 \
+    --instance_per_cycle 4096 \
     --max_prepare_workers 8 \
     --prepare_batch_size_per_gpu 4 \
     --backward_per_head \

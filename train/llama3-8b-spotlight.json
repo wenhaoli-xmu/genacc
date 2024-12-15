@@ -11,7 +11,7 @@
     },
 
     "train": {
-        "train_iters": 2048,
+        "train_iters": 8192,
         "max_lr": 0.001,
         "warmup": 0.01,
         "beta1": 0.9,
@@ -21,44 +21,15 @@
             {
                 "data": "data/slimpajama/arxiv.json",
                 "conf": "config/slimpajama-trunc512.json",
-                "partition": 0.1
+                "partition": 0.5
             },
             {
                 "data": "data/slimpajama/book.json",
                 "conf": "config/slimpajama-trunc512.json",
-                "partition": 0.1
-            },
-            {
-                "data": "data/slimpajama/github.json",
-                "conf": "config/slimpajama-trunc512.json",
-                "partition": 0.1
-            },
-            {
-                "data": "data/slimpajama/wiki.json",
-                "conf": "config/slimpajama-trunc512.json",
-                "partition": 0.1
-            },
-            {
-                "data": "data/slimpajama/stackexchange.json",
-                "conf": "config/slimpajama-trunc512.json",
-                "partition": 0.1
-            },
-            {
-                "data": "data/slimpajama/c4.json",
-                "conf": "config/slimpajama-trunc512.json",
-                "partition": 0.25
-            },
-            {
-                "data": "data/slimpajama/commoncrawl.json",
-                "conf": "config/slimpajama-trunc512.json",
-                "partition": 0.25
+                "partition": 0.5
             }
         ],
         "accum_grad": 1,
-        "clip_grad": 1.0,
-
-        "save": 2048,
-        "eval": 2048,
-        "tasks": []
+        "clip_grad": 1.0
     }
 }
